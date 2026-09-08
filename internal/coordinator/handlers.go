@@ -736,6 +736,62 @@ func (c *Coordinator) handleWorkerUpdatePoll(w http.ResponseWriter, r *http.Requ
 	json.NewEncoder(w).Encode(map[string]interface{}{"update": updateRequestToPublic(worker.UpdateRequest)})
 }
 
+// handleUpdateArtifactDownload lets a worker fetch the bytes of its queued
+// update over the same authenticated connection used for polling/reporting.
+// This is the path every genuinely remote worker needs: manifest artifacts
+// only ever carry a coordinator-local bundle path (see fgupdate.Request),
+// which is never a valid filesystem path on a different machine.
+func (c *Coordinator) handleUpdateArtifactDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Method not allowed", "")
+		return
+	}
+	workerID := r.URL.Query().Get("worker_id")
+	updateID := r.URL.Query().Get("update_id")
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+
+	c.Store.Mu.Lock()
+	worker, ok := c.Store.Workers[workerID]
+	if !ok || worker.TokenHash != hashToken(token) {
+		c.Store.Mu.Unlock()
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", "")
+		return
+	}
+	if worker.UpdateRequest == nil || worker.UpdateRequest.ID != updateID {
+		c.Store.Mu.Unlock()
+		writeError(w, http.StatusNotFound, "NO_UPDATE", "No matching update is queued for this worker", "")
+		return
+	}
+	artifactPath := worker.UpdateRequest.ArtifactPath
+	c.Store.Mu.Unlock()
+
+	if artifactPath == "" {
+		writeError(w, http.StatusNotFound, "NO_ARTIFACT", "This update has no downloadable artifact on the coordinator", "")
+		return
+	}
+	_, bundleDir, err := c.loadUpdateManifest()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "NO_MANIFEST", "No valid update manifest is available", err.Error())
+		return
+	}
+	// Clean+join under a leading "/" so a crafted artifactPath (e.g.
+	// "../../etc/passwd") can't escape bundleDir: filepath.Clean("/"+p)
+	// always yields a path rooted at "/", which then joins under bundleDir.
+	full := filepath.Join(bundleDir, filepath.Clean(string(filepath.Separator)+artifactPath))
+	f, err := os.Open(full)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "ARTIFACT_MISSING", "Artifact file not found on coordinator", err.Error())
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, "ARTIFACT_MISSING", "Artifact path is not a file", "")
+		return
+	}
+	http.ServeContent(w, r, filepath.Base(full), info.ModTime(), f)
+}
+
 func (c *Coordinator) handleWorkerUpdateReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Method not allowed", "")

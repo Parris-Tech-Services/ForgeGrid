@@ -121,6 +121,7 @@ func (c *Coordinator) Start(port string) error {
 	mux.HandleFunc("/api/updates/status", adminAuth(c.handleUpdateStatus))
 	mux.HandleFunc("/api/updates/workers", adminAuth(c.handleQueueWorkerUpdates))
 	mux.HandleFunc("/api/updates/worker", c.handleWorkerUpdatePoll)
+	mux.HandleFunc("/api/updates/artifact", c.handleUpdateArtifactDownload)
 	mux.HandleFunc("/api/updates/report", c.handleWorkerUpdateReport)
 	mux.HandleFunc("/api/jobs/test", adminAuth(c.handleTestJob))
 	mux.HandleFunc("/api/jobs/batch-compute-test", adminAuth(c.handleBatchComputeTest))

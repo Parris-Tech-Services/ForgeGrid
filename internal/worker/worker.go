@@ -1079,21 +1079,16 @@ func (w *Worker) stageUpdate(req fgupdate.Request) {
 	w.mu.Unlock()
 	w.reportUpdate(req.ID, "running", "Staging update package", false)
 
-	source := req.Artifact.Path
-	if source == "" && strings.HasPrefix(req.Artifact.URL, "file://") {
-		if u, err := url.Parse(req.Artifact.URL); err == nil {
-			source = filePathFromFileURL(u.Path)
-		}
-	}
-	if source == "" {
-		w.reportUpdate(req.ID, "failed", "Remote update downloads are not enabled for this worker yet; provide a trusted local update bundle", false)
+	updateDir := filepath.Join(getWorkerDataDir(), "updates", req.ID)
+	if err := os.MkdirAll(updateDir, 0700); err != nil {
+		w.reportUpdate(req.ID, "failed", "Could not create update staging folder: "+err.Error(), false)
 		return
 	}
-	if !filepath.IsAbs(source) {
-		abs, err := filepath.Abs(source)
-		if err == nil {
-			source = abs
-		}
+
+	source, err := w.resolveUpdateSource(req, updateDir)
+	if err != nil {
+		w.reportUpdate(req.ID, "failed", err.Error(), false)
+		return
 	}
 	if err := fgupdate.VerifyFile(source, req.Artifact.SHA256); err != nil {
 		w.reportUpdate(req.ID, "failed", "Update package failed checksum verification: "+err.Error(), false)
@@ -1102,11 +1097,6 @@ func (w *Worker) stageUpdate(req fgupdate.Request) {
 	exe, err := os.Executable()
 	if err != nil {
 		w.reportUpdate(req.ID, "failed", "Could not locate running ForgeGrid executable: "+err.Error(), false)
-		return
-	}
-	updateDir := filepath.Join(getWorkerDataDir(), "updates", req.ID)
-	if err := os.MkdirAll(updateDir, 0700); err != nil {
-		w.reportUpdate(req.ID, "failed", "Could not create update staging folder: "+err.Error(), false)
 		return
 	}
 	rollbackPath := filepath.Join(updateDir, "rollback-"+filepath.Base(exe))
@@ -1191,6 +1181,86 @@ func filePathFromFileURL(p string) string {
 		}
 	}
 	return p
+}
+
+// resolveUpdateSource returns a local, existing file path holding the
+// update artifact's bytes. A manifest artifact reaches the worker as a
+// bundle-relative Path (only meaningful when this worker happens to share
+// a filesystem with the coordinator) or a file:// URL to a path already
+// staged here by some other channel; a genuinely remote worker - every
+// real DadLAN laptop - has neither, so this falls through to downloading
+// the artifact from the coordinator directly over the same authenticated
+// connection already used for polling.
+func (w *Worker) resolveUpdateSource(req fgupdate.Request, updateDir string) (string, error) {
+	if candidate := localCandidatePath(req.Artifact.Path); candidate != "" {
+		return candidate, nil
+	}
+	if strings.HasPrefix(req.Artifact.URL, "file://") {
+		if u, err := url.Parse(req.Artifact.URL); err == nil {
+			if candidate := localCandidatePath(filePathFromFileURL(u.Path)); candidate != "" {
+				return candidate, nil
+			}
+		}
+	}
+	return w.downloadUpdateArtifact(req, updateDir)
+}
+
+// localCandidatePath resolves path to an absolute path and returns it only
+// if a regular file actually exists there. Returning "" (rather than an
+// error) on a missing file lets the caller fall through to downloading the
+// artifact instead of failing outright on a path that only ever made sense
+// on the coordinator's own filesystem.
+func localCandidatePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+	}
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		return ""
+	}
+	return path
+}
+
+// downloadUpdateArtifact fetches the queued update's artifact bytes from
+// the coordinator's /api/updates/artifact endpoint, using the same
+// pinned-TLS client and worker bearer token already trusted for polling
+// and reporting, and saves them under updateDir.
+func (w *Worker) downloadUpdateArtifact(req fgupdate.Request, updateDir string) (string, error) {
+	downloadURL := fmt.Sprintf("%s/api/updates/artifact?worker_id=%s&update_id=%s", w.CoordinatorURL, w.WorkerID, req.ID)
+	httpReq, err := http.NewRequest("GET", downloadURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build update download request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+w.Token)
+	resp, err := w.Client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("download update artifact: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download update artifact: coordinator returned %s", resp.Status)
+	}
+	name := filepath.Base(req.Artifact.Path)
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		name = "candidate-" + req.ID
+	}
+	dest := filepath.Join(updateDir, "downloaded-"+name)
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0700)
+	if err != nil {
+		return "", fmt.Errorf("create downloaded artifact file: %w", err)
+	}
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		out.Close()
+		return "", fmt.Errorf("save downloaded artifact: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return "", fmt.Errorf("save downloaded artifact: %w", err)
+	}
+	return dest, nil
 }
 
 func copyFile(src, dst string, perm os.FileMode) error {
