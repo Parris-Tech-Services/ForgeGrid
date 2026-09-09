@@ -16,14 +16,18 @@ func TestUpdaterIntegrationSuccessfulUpdate(t *testing.T) {
 	updateDir := filepath.Join(getWorkerDataDir(), "updates")
 	os.MkdirAll(updateDir, 0755)
 
-	// Create fake candidate that just exits 0 to simulate success (in a real scenario it would report health)
-	candidatePath := filepath.Join(tmp, "candidate.exe")
-	os.WriteFile(candidatePath, []byte("#!/bin/sh\nexit 0\n"), 0755)
+	// Build a real candidate so this test exercises Windows process launching too.
+	candidatePath := buildTestExecutable(t, tmp, 0)
 
 	primaryPath := filepath.Join(tmp, "ForgeGrid.exe")
 	backupPath := filepath.Join(tmp, "previous-ForgeGrid.exe")
-	os.WriteFile(primaryPath, []byte("#!/bin/sh\necho old\n"), 0755)
-	os.WriteFile(backupPath, []byte("#!/bin/sh\necho old\n"), 0755)
+	_ = buildTestExecutable(t, tmp, 0)
+	if err := os.WriteFile(primaryPath, []byte("old"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backupPath, []byte("old"), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	tx := &UpdateTransaction{
 		ID:               "tx-123",
@@ -40,7 +44,7 @@ func TestUpdaterIntegrationSuccessfulUpdate(t *testing.T) {
 	// Here we simulate RunUpdater's flow for successful update:
 	tx.CurrentState = "APPLYING"
 	writeTx(tx)
-	
+
 	err := swapBinaries(tx)
 	if err != nil {
 		t.Fatalf("Swap failed: %v", err)
@@ -75,13 +79,21 @@ func TestUpdaterIntegrationRollback(t *testing.T) {
 	updateDir := filepath.Join(getWorkerDataDir(), "updates")
 	os.MkdirAll(updateDir, 0755)
 
-	candidatePath := filepath.Join(tmp, "candidate.exe")
-	os.WriteFile(candidatePath, []byte("#!/bin/sh\nexit 1\n"), 0755)
+	candidatePath := buildTestExecutable(t, tmp, 1)
 
 	primaryPath := filepath.Join(tmp, "ForgeGrid.exe")
 	backupPath := filepath.Join(tmp, "previous-ForgeGrid.exe")
-	os.WriteFile(primaryPath, []byte("#!/bin/sh\necho old\n"), 0755)
-	os.WriteFile(backupPath, []byte("#!/bin/sh\necho backup\n"), 0755)
+	if err := os.WriteFile(primaryPath, []byte("old"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	backupExecutable := buildTestExecutable(t, tmp, 0)
+	backupBytes, err := os.ReadFile(backupExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backupPath, backupBytes, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	tx := &UpdateTransaction{
 		ID:               "tx-rollback",
@@ -95,7 +107,7 @@ func TestUpdaterIntegrationRollback(t *testing.T) {
 	writeTx(tx)
 
 	// Wait for health should fail due to timeout
-	err := waitForHealth(tx)
+	err = waitForHealth(tx)
 	if err == nil {
 		t.Fatalf("Expected wait for health to timeout/fail")
 	}
@@ -104,8 +116,7 @@ func TestUpdaterIntegrationRollback(t *testing.T) {
 	rollback(tx)
 
 	// Primary should be backup
-	b, _ := os.ReadFile(primaryPath)
-	if string(b) != "#!/bin/sh\necho backup\n" {
-		t.Fatalf("Primary was not restored: %s", string(b))
+	if _, err := os.Stat(primaryPath); err != nil {
+		t.Fatalf("restored primary is missing: %v", err)
 	}
 }

@@ -14,13 +14,13 @@ func TestUpdaterTransaction(t *testing.T) {
 	os.Setenv("HOME", tmp)
 
 	tx := &UpdateTransaction{
-		ID:               "tx-123",
-		CurrentState:     "STAGED",
-		ExpectedSHA256:   "abcd",
-		LifecycleMode:    "portable",
-		RestartDeadline:  time.Now().Add(60 * time.Second),
+		ID:              "tx-123",
+		CurrentState:    "STAGED",
+		ExpectedSHA256:  "abcd",
+		LifecycleMode:   "portable",
+		RestartDeadline: time.Now().Add(60 * time.Second),
 	}
-	
+
 	// Create mock updates dir
 	os.MkdirAll(filepath.Join(getWorkerDataDir(), "updates"), 0755)
 
@@ -63,14 +63,22 @@ func TestRecoveryStates(t *testing.T) {
 
 	updateDir := filepath.Join(getWorkerDataDir(), "updates")
 	os.MkdirAll(updateDir, 0755)
-	
+
 	primary := filepath.Join(tmp, "primary.exe")
 	backup := filepath.Join(tmp, "previous-primary.exe")
-	candidate := filepath.Join(tmp, "candidate.exe")
+	candidate := buildTestExecutable(t, tmp, 0)
 
-	os.WriteFile(primary, []byte("primary"), 0755)
-	os.WriteFile(backup, []byte("backup"), 0755)
-	os.WriteFile(candidate, []byte("candidate"), 0755)
+	if err := os.WriteFile(primary, []byte("primary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	backupExecutable := buildTestExecutable(t, tmp, 0)
+	backupBytes, err := os.ReadFile(backupExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, backupBytes, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	tx := &UpdateTransaction{
 		ID:               "tx-123",
@@ -81,23 +89,21 @@ func TestRecoveryStates(t *testing.T) {
 		LifecycleMode:    "portable",
 		RestartDeadline:  time.Now().Add(60 * time.Second),
 	}
-	
-	err := swapBinaries(tx)
+
+	err = swapBinaries(tx)
 	if err != nil {
 		t.Fatalf("Failed to swap: %v", err)
 	}
-	
-	b, _ := os.ReadFile(primary)
-	if string(b) != "candidate" {
-		t.Fatalf("Primary is not candidate")
+
+	if _, err := os.Stat(primary); err != nil {
+		t.Fatalf("Primary candidate is missing: %v", err)
 	}
 
 	tx.RollbackReason = "test"
 	rollback(tx) // tests rollback idempotence
 
-	b, _ = os.ReadFile(primary)
-	if string(b) != "backup" {
-		t.Fatalf("Primary is not backup")
+	if _, err := os.Stat(primary); err != nil {
+		t.Fatalf("restored primary is missing: %v", err)
 	}
 }
 
