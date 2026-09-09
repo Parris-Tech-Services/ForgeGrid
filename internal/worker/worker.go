@@ -83,6 +83,9 @@ func (w *Worker) tryBeginUpdate(id string) bool {
 	if w.pendingUpdateIDs[id] {
 		return false
 	}
+	if tx, err := readTx(); err == nil && tx != nil && tx.ID == id {
+		return false
+	}
 	w.pendingUpdateIDs[id] = true
 	return true
 }
@@ -628,6 +631,16 @@ func (w *Worker) verifyUpdateTransaction() {
 	}
 
 	if tx.CurrentState == "COMPLETED" || tx.CurrentState == "ROLLED_BACK" || tx.CurrentState == "ROLLBACK_FAILED" {
+		return
+	}
+
+	if tx.CurrentState == "APPLYING" {
+		log.Printf("[Update] Restart recovery saw persisted APPLYING state; emitting a durable terminal transition instead of leaving a half-applied transaction in place")
+		tx.RollbackReason = "Persisted APPLYING transaction recovered at restart without completing the swap"
+		tx.CurrentState = "ROLLBACK_FAILED"
+		if err := writeTx(tx); err != nil {
+			log.Printf("[Update] Could not persist restart recovery transition: %v", err)
+		}
 		return
 	}
 
@@ -1501,15 +1514,28 @@ func (w *Worker) downloadUpdateArtifact(req fgupdate.Request, updateDir string) 
 		name = "candidate-" + req.ID
 	}
 	dest := filepath.Join(updateDir, "downloaded-"+name)
+	if err := os.Remove(dest); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("remove prior downloaded artifact file: %w", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read downloaded artifact: %w", err)
+	}
+	if req.Artifact.Size > 0 && int64(len(body)) != req.Artifact.Size {
+		_ = os.Remove(dest)
+		return "", fmt.Errorf("downloaded artifact size mismatch: declared %d, got %d", req.Artifact.Size, len(body))
+	}
 	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0700)
 	if err != nil {
 		return "", fmt.Errorf("create downloaded artifact file: %w", err)
 	}
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	if _, err := out.Write(body); err != nil {
 		out.Close()
+		_ = os.Remove(dest)
 		return "", fmt.Errorf("save downloaded artifact: %w", err)
 	}
 	if err := out.Close(); err != nil {
+		_ = os.Remove(dest)
 		return "", fmt.Errorf("save downloaded artifact: %w", err)
 	}
 	return dest, nil
