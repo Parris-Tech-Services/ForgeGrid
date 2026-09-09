@@ -20,6 +20,7 @@
         button:hover { filter: brightness(1.08); }
         button:disabled { cursor: not-allowed; opacity: 0.45; }
         .ghost-button { background: #30353a; border: 1px solid #49515a; }
+        .ghost-button.selected { border-color: var(--blue); box-shadow: inset 0 0 0 1px var(--blue); }
         .danger-button { background: var(--red); }
         .warn-button { background: #876500; }
         .success-button { background: #159264; }
@@ -290,10 +291,10 @@ chmod 600 ~/.config/forgegrid/coordinator/github-token.txt</textarea>
     <div class="card">
         <h2>Recent Jobs</h2>
         <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
-            <button class="ghost-button" onclick="setJobFilter('all')">All</button>
-            <button class="ghost-button" onclick="setJobFilter('active')">Running</button>
-            <button class="ghost-button" onclick="setJobFilter('failed')">Failed</button>
-            <button class="ghost-button" onclick="setJobFilter('completed')">Completed</button>
+            <button id="jobFilterBtn-all" class="ghost-button" onclick="setJobFilter('all')">Recent</button>
+            <button id="jobFilterBtn-active" class="ghost-button" onclick="setJobFilter('active')">Running<span id="jobCount-active" class="muted"></span></button>
+            <button id="jobFilterBtn-failed" class="ghost-button" onclick="setJobFilter('failed')">Failed<span id="jobCount-failed" class="muted"></span></button>
+            <button id="jobFilterBtn-completed" class="ghost-button" onclick="setJobFilter('completed')">Completed<span id="jobCount-completed" class="muted"></span></button>
         </div>
         <div id="jobsPagingNote" class="muted" style="margin-bottom: 8px; font-size: 12px;"></div>
         <div class="table-wrap"><table>
@@ -365,8 +366,9 @@ chmod 600 ~/.config/forgegrid/coordinator/github-token.txt</textarea>
         let selectedWorkerId = "";
         let selectedQuickJob = "smoke";
         let jobFilter = "all";
-        let jobsShowAll = false;
+        let jobsFinishedLimit = 20;
         const JOBS_PAGE_SIZE = 20;
+        const JOB_ACTIVE_STATUSES = ['PENDING', 'CLAIMED', 'RUNNING', 'CANCEL_REQUESTED'];
         let projectsStore = [];
         let updatesStore = null;
         let selectedProject = null;
@@ -471,20 +473,65 @@ chmod 600 ~/.config/forgegrid/coordinator/github-token.txt</textarea>
 
         function setJobFilter(filter) {
             jobFilter = filter;
-            jobsShowAll = false;
+            jobsFinishedLimit = JOBS_PAGE_SIZE;
             renderJobs();
         }
 
-        function toggleJobsShowAll() {
-            jobsShowAll = !jobsShowAll;
+        function showMoreFinishedJobs() {
+            jobsFinishedLimit += JOBS_PAGE_SIZE;
             renderJobs();
         }
 
-        function jobMatchesFilter(job) {
-            if (jobFilter === 'active') return ['PENDING', 'CLAIMED', 'RUNNING', 'CANCEL_REQUESTED'].includes(job.status);
-            if (jobFilter === 'failed') return job.status === 'FAILED';
-            if (jobFilter === 'completed') return job.status === 'COMPLETED';
-            return true;
+        function showAllFinishedJobs() {
+            jobsFinishedLimit = Infinity;
+            renderJobs();
+        }
+
+        function collapseFinishedJobs() {
+            jobsFinishedLimit = JOBS_PAGE_SIZE;
+            renderJobs();
+        }
+
+        function isActiveJobStatus(status) {
+            return JOB_ACTIVE_STATUSES.includes(status);
+        }
+
+        function jobSortKey(job) {
+            return new Date(job.start_time || job.created_at || job.end_time || 0).getTime();
+        }
+
+        function sortJobsNewestFirst(jobs) {
+            return jobs.slice().sort((a, b) => jobSortKey(b) - jobSortKey(a));
+        }
+
+        // Pure and side-effect free: never mutates `jobs`. `filter` is one of
+        // 'all' | 'active' | 'failed' | 'completed'. `limit` caps how many
+        // *finished* (non-active) jobs are shown; active jobs are never capped,
+        // since an old-but-still-running job must never be hidden by the limit.
+        function visibleJobs(jobs, filter, limit) {
+            let matching;
+            if (filter === 'active') {
+                matching = jobs.filter(j => isActiveJobStatus(j.status));
+            } else if (filter === 'failed') {
+                matching = jobs.filter(j => j.status === 'FAILED');
+            } else if (filter === 'completed') {
+                matching = jobs.filter(j => j.status === 'COMPLETED');
+            } else {
+                matching = jobs.slice();
+            }
+            const sorted = sortJobsNewestFirst(matching);
+            const active = sorted.filter(j => isActiveJobStatus(j.status));
+            const finished = sorted.filter(j => !isActiveJobStatus(j.status));
+            const finishedShown = Math.min(limit, finished.length);
+            const shownSet = new Set(active.concat(finished.slice(0, finishedShown)));
+            const visible = sorted.filter(j => shownSet.has(j));
+            return {
+                visible: visible,
+                total: sorted.length,
+                activeCount: active.length,
+                finishedTotal: finished.length,
+                finishedShown: finishedShown,
+            };
         }
 
         function projectLabel(project) {
@@ -1462,6 +1509,23 @@ Then run:
             renderJobs();
         }
 
+        function renderJobsFilterButtons(jobs) {
+            ['all', 'active', 'failed', 'completed'].forEach(key => {
+                const btn = document.getElementById('jobFilterBtn-' + key);
+                if (btn) btn.classList.toggle('selected', jobFilter === key);
+            });
+            const counts = { active: 0, failed: 0, completed: 0 };
+            jobs.forEach(j => {
+                if (isActiveJobStatus(j.status)) counts.active++;
+                else if (j.status === 'FAILED') counts.failed++;
+                else if (j.status === 'COMPLETED') counts.completed++;
+            });
+            ['active', 'failed', 'completed'].forEach(key => {
+                const span = document.getElementById('jobCount-' + key);
+                if (span) span.textContent = ' ' + counts[key];
+            });
+        }
+
         function renderJobs() {
             const tbody = document.getElementById('jobsTable');
             tbody.innerHTML = '';
@@ -1472,20 +1536,26 @@ Then run:
                         retryChildren[j.retry_of] = (retryChildren[j.retry_of] || 0) + 1;
                     }
                 });
-                const matching = jobsStore.filter(jobMatchesFilter).sort((a, b) => new Date(b.start_time || 0) - new Date(a.start_time || 0));
-                const visible = jobsShowAll ? matching : matching.slice(0, JOBS_PAGE_SIZE);
+                const result = visibleJobs(jobsStore, jobFilter, jobsFinishedLimit);
+                renderJobsFilterButtons(jobsStore);
                 const pagingNote = document.getElementById('jobsPagingNote');
                 if (pagingNote) {
-                    if (matching.length > JOBS_PAGE_SIZE) {
-                        const hidden = matching.length - visible.length;
-                        pagingNote.innerHTML = hidden > 0
-                            ? `Showing ${visible.length} of ${matching.length} jobs. <button class="ghost-button" onclick="toggleJobsShowAll()">Show all</button>`
-                            : `Showing all ${matching.length} jobs. <button class="ghost-button" onclick="toggleJobsShowAll()">Show fewer</button>`;
-                    } else {
+                    const remaining = result.finishedTotal - result.finishedShown;
+                    if (result.total === 0) {
                         pagingNote.innerHTML = '';
+                    } else {
+                        let html = `Showing ${result.visible.length} of ${result.total} jobs`;
+                        if (remaining > 0) {
+                            const nextChunk = Math.min(JOBS_PAGE_SIZE, remaining);
+                            html += ` &mdash; <button class="ghost-button" onclick="showMoreFinishedJobs()">Show ${nextChunk} more</button>`;
+                            html += ` <button class="ghost-button" onclick="showAllFinishedJobs()">Show all</button>`;
+                        } else if (result.finishedShown > JOBS_PAGE_SIZE) {
+                            html += ` &mdash; <button class="ghost-button" onclick="collapseFinishedJobs()">Show fewer</button>`;
+                        }
+                        pagingNote.innerHTML = html;
                     }
                 }
-                visible.forEach(j => {
+                result.visible.forEach(j => {
                     const machineName = jobMachineName(j);
                     const machineDetail = jobMachineDetail(j);
                     let dateStr = '-';
