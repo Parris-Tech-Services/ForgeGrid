@@ -44,6 +44,13 @@ type Worker struct {
 	Token          string
 	NodeName       string
 	Client         *http.Client
+	// DownloadClient is used only for pulling update artifact bytes from the
+	// coordinator. It shares Client's transport/TLS pinning but needs a much
+	// longer timeout: Client's 10s timeout is sized for small poll/report
+	// JSON calls and is not enough time to reliably pull a multi-MB binary
+	// over a real network to a physical machine, even though it is more
+	// than enough for the same transfer in a fast/local test environment.
+	DownloadClient *http.Client
 	Workspace      string
 	Insecure       bool
 	Fingerprint    string
@@ -420,9 +427,14 @@ func (w *Worker) LoadCreds() error {
 	return nil
 }
 
+// downloadClientTimeout is generous on purpose: it bounds a real artifact
+// transfer to a physical remote machine, not a lightweight poll/report call.
+const downloadClientTimeout = 5 * time.Minute
+
 func (w *Worker) SetupClient(fingerprint string) {
 	if w.Insecure {
 		w.Client = &http.Client{Timeout: 10 * time.Second}
+		w.DownloadClient = &http.Client{Timeout: downloadClientTimeout}
 		return
 	}
 	tr := &http.Transport{
@@ -430,6 +442,10 @@ func (w *Worker) SetupClient(fingerprint string) {
 	}
 	w.Client = &http.Client{
 		Timeout:   10 * time.Second,
+		Transport: tr,
+	}
+	w.DownloadClient = &http.Client{
+		Timeout:   downloadClientTimeout,
 		Transport: tr,
 	}
 }
@@ -571,6 +587,9 @@ func (w *Worker) Pair(ip, code, fingerprint string) error {
 func (w *Worker) Start() {
 	if w.Client == nil {
 		w.Client = &http.Client{Timeout: 10 * time.Second} // Should only happen in tests that bypassed Pair
+	}
+	if w.DownloadClient == nil {
+		w.DownloadClient = &http.Client{Timeout: downloadClientTimeout} // Should only happen in tests that bypassed Pair
 	}
 	
 	w.cleanupUpdateFiles()
@@ -1228,7 +1247,10 @@ func localCandidatePath(path string) string {
 // downloadUpdateArtifact fetches the queued update's artifact bytes from
 // the coordinator's /api/updates/artifact endpoint, using the same
 // pinned-TLS client and worker bearer token already trusted for polling
-// and reporting, and saves them under updateDir.
+// and reporting, and saves them under updateDir. It uses DownloadClient, not
+// Client: Client's 10s timeout is sized for small poll/report JSON calls
+// and was found (via the real Laptop03 canary) to be too short to reliably
+// pull a multi-MB binary over a real network to a physical machine.
 func (w *Worker) downloadUpdateArtifact(req fgupdate.Request, updateDir string) (string, error) {
 	downloadURL := fmt.Sprintf("%s/api/updates/artifact?worker_id=%s&update_id=%s", w.CoordinatorURL, w.WorkerID, req.ID)
 	httpReq, err := http.NewRequest("GET", downloadURL, nil)
@@ -1236,7 +1258,11 @@ func (w *Worker) downloadUpdateArtifact(req fgupdate.Request, updateDir string) 
 		return "", fmt.Errorf("build update download request: %w", err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+w.Token)
-	resp, err := w.Client.Do(httpReq)
+	client := w.DownloadClient
+	if client == nil {
+		client = w.Client
+	}
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("download update artifact: %w", err)
 	}

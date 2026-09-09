@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	fgupdate "forgegrid/internal/update"
 )
@@ -82,6 +83,59 @@ func TestResolveUpdateSourceFallsBackToDownload(t *testing.T) {
 	}
 	if gotAuth != "Bearer tok-1" {
 		t.Fatalf("download request Authorization = %q, want %q", gotAuth, "Bearer tok-1")
+	}
+}
+
+// TestSetupClientGivesDownloadClientALongerTimeout guards the fix for the
+// real Laptop03 canary failure: the artifact download silently returned
+// zero bytes (not an error) because it shared Client's 10s overall
+// http.Client.Timeout, sized for small poll/report JSON calls, not a
+// multi-MB binary transfer to a physical remote machine. Verified against
+// the real coordinator+curl (which is fast/local and succeeds) versus the
+// real Windows worker (slower real network, empty body) before concluding
+// the timeout, not the coordinator, was the cause.
+func TestSetupClientGivesDownloadClientALongerTimeout(t *testing.T) {
+	w := &Worker{}
+	w.SetupClient("")
+	if w.DownloadClient == nil {
+		t.Fatal("SetupClient did not set DownloadClient")
+	}
+	if w.DownloadClient.Timeout <= w.Client.Timeout {
+		t.Fatalf("DownloadClient.Timeout = %v, want it longer than Client.Timeout = %v", w.DownloadClient.Timeout, w.Client.Timeout)
+	}
+}
+
+// TestDownloadUpdateArtifactUsesDownloadClientNotClient proves the artifact
+// download actually goes through DownloadClient rather than the short-lived
+// Client used for polling/reporting: Client here has a near-zero timeout
+// that would fail against any real server, while DownloadClient points at
+// the real working test server.
+func TestDownloadUpdateArtifactUsesDownloadClientNotClient(t *testing.T) {
+	const artifactBody = "pretend worker binary bytes"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(artifactBody))
+	}))
+	defer ts.Close()
+
+	w := &Worker{
+		WorkerID:       "worker-1",
+		Token:          "tok-1",
+		CoordinatorURL: ts.URL,
+		Client:         &http.Client{Timeout: 1 * time.Nanosecond},
+		DownloadClient: &http.Client{},
+	}
+
+	req := fgupdate.Request{ID: "update-1", Artifact: fgupdate.Artifact{Path: filepath.Join(t.TempDir(), "nonexistent.exe")}}
+	source, err := w.resolveUpdateSource(req, t.TempDir())
+	if err != nil {
+		t.Fatalf("resolveUpdateSource: %v (Client's near-zero timeout would fail; DownloadClient should have been used instead)", err)
+	}
+	got, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("reading resolved source: %v", err)
+	}
+	if string(got) != artifactBody {
+		t.Fatalf("downloaded content = %q, want %q", got, artifactBody)
 	}
 }
 
