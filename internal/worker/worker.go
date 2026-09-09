@@ -55,18 +55,18 @@ type Worker struct {
 	Insecure       bool
 	Fingerprint    string
 
-	mu                sync.Mutex
-	activeJobs        map[string]context.CancelFunc
-	stopOnce          sync.Once
-	stopCh            chan struct{}
-	loopsDone         sync.WaitGroup
-	allowedRepos      map[string]bool
-	allowPush         bool
-	allowBootstrap    bool
-	Labels            []string
-	Capabilities      []string
-	capabilityAllow   []string
-	pendingUpdateIDs  map[string]bool
+	mu               sync.Mutex
+	activeJobs       map[string]context.CancelFunc
+	stopOnce         sync.Once
+	stopCh           chan struct{}
+	loopsDone        sync.WaitGroup
+	allowedRepos     map[string]bool
+	allowPush        bool
+	allowBootstrap   bool
+	Labels           []string
+	Capabilities     []string
+	capabilityAllow  []string
+	pendingUpdateIDs map[string]bool
 }
 
 // tryBeginUpdate claims update id for this worker process, returning false
@@ -539,6 +539,10 @@ func (w *Worker) Pair(ip, code, fingerprint string) error {
 		"total_ram":           hw.TotalRAM,
 		"available_ram":       hw.AvailableRAM,
 		"free_workspace_disk": hw.FreeWorkspaceDisk,
+		"cpu_percent":         w.cpuPercent(),
+		"uptime_seconds":      w.uptimeSeconds(),
+		"active_job_count":    w.activeJobCount(),
+		"worker_health":       w.workerHealth(),
 		"labels":              hw.Labels,
 		"capabilities":        hw.Capabilities,
 		"version":             hw.Version,
@@ -601,7 +605,7 @@ func (w *Worker) Start() {
 	if w.DownloadClient == nil {
 		w.DownloadClient = &http.Client{Timeout: downloadClientTimeout} // Should only happen in tests that bypassed Pair
 	}
-	
+
 	w.cleanupUpdateFiles()
 	w.verifyUpdateTransaction()
 
@@ -617,7 +621,7 @@ func (w *Worker) verifyUpdateTransaction() {
 	if err != nil {
 		return
 	}
-	
+
 	// If txID is not empty, ensure it matches. If empty (e.g. started by Windows SCM), we just use the active tx.
 	if txID != "" && tx.ID != txID {
 		return
@@ -679,7 +683,7 @@ func (w *Worker) verifyUpdateTransaction() {
 	// Wait briefly to ensure any prior connection closes, then send heartbeat
 	time.Sleep(1 * time.Second)
 	w.sendHeartbeat()
-	
+
 	status, _ := readStatus()
 	if status == nil || status.State != "heartbeat_ok" {
 		log.Printf("[Update] Candidate failed health verification: could not reconnect to coordinator")
@@ -765,11 +769,19 @@ func (w *Worker) sendHeartbeat() {
 			free = d.Free
 		}
 	}
+	cpuPercent := w.cpuPercent()
+	uptimeSeconds := w.uptimeSeconds()
+	activeJobCount := w.activeJobCount()
+	workerHealth := w.workerHealth()
 
 	reqBody := map[string]interface{}{
 		"worker_id":           w.WorkerID,
 		"available_ram":       avail,
 		"free_workspace_disk": free,
+		"cpu_percent":         cpuPercent,
+		"uptime_seconds":      uptimeSeconds,
+		"active_job_count":    activeJobCount,
+		"worker_health":       workerHealth,
 		"labels":              labels,
 		"capabilities":        capabilities,
 		"version":             version.Info(),
@@ -800,6 +812,36 @@ func (w *Worker) sendHeartbeat() {
 		return
 	}
 	w.writeStatus("heartbeat_ok", "Connected to trusted coordinator", true)
+}
+
+func (w *Worker) cpuPercent() float64 {
+	values, err := cpu.Percent(0, false)
+	if err != nil || len(values) == 0 {
+		return 0
+	}
+	return values[0]
+}
+
+func (w *Worker) uptimeSeconds() uint64 {
+	uptime, err := host.Uptime()
+	if err != nil {
+		return 0
+	}
+	return uptime
+}
+
+func (w *Worker) activeJobCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.activeJobs)
+}
+
+func (w *Worker) workerHealth() string {
+	_, drift := w.ValidateCapabilities()
+	if len(drift) > 0 {
+		return "limited"
+	}
+	return "ready"
 }
 
 func (w *Worker) writeStatus(state, message string, connected bool) {
@@ -1376,7 +1418,7 @@ func (w *Worker) executeJob(job models.Job) {
 		inputStr := job.Parameters["input"]
 		input, _ := strconv.Atoi(inputStr)
 		start := time.Now()
-		
+
 		// Deterministic small CPU calculation
 		// e.g. sum of primes up to input
 		sum := 0
@@ -1392,10 +1434,10 @@ func (w *Worker) executeJob(job models.Job) {
 				sum += i
 			}
 		}
-		
+
 		finish := time.Now()
 		duration := finish.Sub(start)
-		
+
 		resultStr := fmt.Sprintf("Result: %d, Start: %s, Finish: %s, Duration: %s, Worker: %s", sum, start.Format(time.RFC3339), finish.Format(time.RFC3339), duration.String(), w.NodeName)
 		logs := []byte(resultStr + "\n")
 		w.updateJobStatus(job.ID, job.AttemptID, models.StatusCompleted, fmt.Sprintf("%d", sum), logs, logSeq)
@@ -1436,7 +1478,7 @@ func (w *Worker) executeJob(job models.Job) {
 
 		finish := time.Now()
 		duration := finish.Sub(start)
-		
+
 		resultStr := fmt.Sprintf("Result: Base64PNGFragment, Start: %s, Finish: %s, Duration: %s, Worker: %s", start.Format(time.RFC3339), finish.Format(time.RFC3339), duration.String(), w.NodeName)
 		logs := []byte(resultStr + "\n")
 		w.updateJobStatus(job.ID, job.AttemptID, models.StatusCompleted, b64, logs, logSeq)
@@ -1606,7 +1648,7 @@ func (w *Worker) executeJob(job models.Job) {
 			isAgentTask := stage.Profile == "ai"
 			var profile execution.Profile
 			var err error
-			
+
 			if !isAgentTask {
 				profile, err = execution.GetProfile(stage.Profile)
 				if err != nil {
@@ -1649,7 +1691,7 @@ func (w *Worker) executeJob(job models.Job) {
 				}
 				job.AgentActual = agentID
 				resultMeta.AgentActual = agentID
-				
+
 				provider, err := agent.GetProvider(agentID)
 				if err != nil {
 					finalResult = "agent not found"
@@ -1661,24 +1703,24 @@ func (w *Worker) executeJob(job models.Job) {
 					execCancel()
 					break
 				}
-				
+
 				req := agent.AgentRequest{
-					Task:                job.Task,
-					Repository:          job.RepositoryURL,
-					ProjectName:         job.ProjectName,
-					Workspace:           workDir,
-					BaseBranch:          job.BaseBranch,
-					BaseSHA:             job.BaseCommit,
-					WorkBranch:          branchName,
-					SafetyInstructions:  agent.StandardSafetyInstructions(),
+					Task:               job.Task,
+					Repository:         job.RepositoryURL,
+					ProjectName:        job.ProjectName,
+					Workspace:          workDir,
+					BaseBranch:         job.BaseBranch,
+					BaseSHA:            job.BaseCommit,
+					WorkBranch:         branchName,
+					SafetyInstructions: agent.StandardSafetyInstructions(),
 				}
-				
+
 				if stage.Parameters["prompt"] != "" {
 					req.Task = stage.Parameters["prompt"]
 				} else if job.Description != "" {
 					req.Task = job.Description
 				}
-				
+
 				inv, err := provider.BuildInvocation(req)
 				if err != nil {
 					finalResult = "invocation error"
@@ -1690,21 +1732,21 @@ func (w *Worker) executeJob(job models.Job) {
 					execCancel()
 					break
 				}
-				
+
 				cmd := exec.CommandContext(execCtx, inv.Executable, inv.Args...)
 				cmd.Dir = workDir
-				
+
 				// Standard environment mapping
 				cmd.Env = os.Environ()
-				
+
 				var outBytes, errBytes bytes.Buffer
 				cmd.Stdout = &outBytes
 				cmd.Stderr = &errBytes
-				
+
 				started := time.Now()
 				err = cmd.Run()
 				ended := time.Now()
-				
+
 				execResult := agent.ExecutionResult{
 					ExitCode: cmd.ProcessState.ExitCode(),
 					Duration: ended.Sub(started),
@@ -1712,13 +1754,13 @@ func (w *Worker) executeJob(job models.Job) {
 					Stderr:   errBytes.Bytes(),
 					Error:    err,
 				}
-				
+
 				agentResult := provider.InterpretResult(execResult)
-				
+
 				stageOut = append(stageOut, outBytes.Bytes()...)
 				stageOut = append(stageOut, errBytes.Bytes()...)
 				stageOut = append(stageOut, []byte(fmt.Sprintf("\n[%s] %s\n", provider.DisplayName(), agentResult.Message))...)
-				
+
 				if agentResult.Status != "COMPLETED" {
 					err = fmt.Errorf("%s", agentResult.Message)
 				}

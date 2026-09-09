@@ -27,6 +27,7 @@
         th, td { text-align: left; padding: 10px; border-bottom: 1px solid #333; }
         .status-online { color: var(--green); }
         .status-offline { color: var(--red); }
+        .status-warning { color: var(--yellow); }
         input, textarea, select { background: #333; color: white; border: 1px solid #555; padding: 8px; border-radius: 4px; }
         .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
         .command-grid { display: grid; grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.1fr); gap: 20px; align-items: start; }
@@ -242,6 +243,7 @@ chmod 600 ~/.config/forgegrid/coordinator/github-token.txt</textarea>
                     <th>Node Name</th>
                     <th>OS</th>
                     <th>CPU / RAM</th>
+                    <th>Health / Load</th>
                     <th>Labels / Capabilities</th>
                     <th>Status</th>
                     <th>Last Seen</th>
@@ -1254,11 +1256,16 @@ Then run:
                         }
                     }
 
+                    const health = w.worker_health || (statusClass === 'status-online' ? 'unknown' : 'offline');
+                    const healthClass = health === 'ready' ? 'status-online' : (health === 'limited' ? 'status-warning' : 'status-offline');
+                    const uptimeHours = w.uptime_seconds ? `${Math.floor(w.uptime_seconds / 3600)}h` : '-';
+
                     tbody.innerHTML += `
                         <tr>
                             <td>${escapeHTML(w.node_name)}</td>
                             <td>${escapeHTML(w.os)}</td>
                             <td>${escapeHTML(w.cpu_model || w.cpu)} / ${Math.round(w.total_ram / 1073741824)}GB</td>
+                            <td class="${healthClass}"><strong>${escapeHTML(health)}</strong><br><small>${Number(w.cpu_percent || 0).toFixed(1)}% CPU · ${escapeHTML(uptimeHours)} up · ${w.active_job_count || 0} active</small></td>
                             <td>${escapeHTML(machineCapabilityText(w))}<div class="version-line">${escapeHTML(workerVersionText(w))}</div></td>
                             <td class="${statusClass}"><strong>${escapeHTML(statusText)}</strong>${w.drain ? ' / drain' : ''}${w.disabled ? ' / disabled' : ''}</td>
                             <td>${lastSeen.toLocaleTimeString()}</td>
@@ -1305,6 +1312,7 @@ Then run:
                         <div>
                             <div class="machine-name">${escapeHTML(w.node_name)}</div>
                             <div class="muted">${escapeHTML(w.os)} · ${Math.round((w.total_ram || 0) / 1073741824)} GB RAM</div>
+                            <div class="muted">${escapeHTML(w.worker_health || 'health unknown')} · ${Number(w.cpu_percent || 0).toFixed(1)}% CPU · ${w.active_job_count || 0} active</div>
                             <div class="version-line">${escapeHTML(workerVersionText(w))}</div>
                         </div>
                         <span class="pill ${online ? 'online' : 'offline'}">${online ? 'online' : 'offline'}</span>

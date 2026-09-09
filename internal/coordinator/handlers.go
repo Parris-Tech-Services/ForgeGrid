@@ -311,6 +311,10 @@ func (c *Coordinator) handlePair(w http.ResponseWriter, r *http.Request) {
 		TotalRAM          uint64           `json:"total_ram"`
 		AvailableRAM      uint64           `json:"available_ram"`
 		FreeWorkspaceDisk uint64           `json:"free_workspace_disk"`
+		CPUPercent        float64          `json:"cpu_percent"`
+		UptimeSeconds     uint64           `json:"uptime_seconds"`
+		ActiveJobCount    int              `json:"active_job_count"`
+		WorkerHealth      string           `json:"worker_health"`
 		Labels            []string         `json:"labels"`
 		Capabilities      []string         `json:"capabilities"`
 		Version           version.InfoData `json:"version"`
@@ -360,6 +364,10 @@ func (c *Coordinator) handlePair(w http.ResponseWriter, r *http.Request) {
 		TotalRAM:          req.TotalRAM,
 		AvailableRAM:      req.AvailableRAM,
 		FreeWorkspaceDisk: req.FreeWorkspaceDisk,
+		CPUPercent:        req.CPUPercent,
+		UptimeSeconds:     req.UptimeSeconds,
+		ActiveJobCount:    req.ActiveJobCount,
+		WorkerHealth:      req.WorkerHealth,
 		Labels:            append([]string{}, req.Labels...),
 		Capabilities:      append([]string{}, req.Capabilities...),
 		Version:           req.Version,
@@ -379,12 +387,16 @@ func (c *Coordinator) handlePair(w http.ResponseWriter, r *http.Request) {
 func (c *Coordinator) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var req struct {
-		WorkerID     string           `json:"worker_id"`
-		AvailableRAM uint64           `json:"available_ram"`
-		FreeDisk     uint64           `json:"free_workspace_disk"`
-		Labels       []string         `json:"labels"`
-		Capabilities []string         `json:"capabilities"`
-		Version      version.InfoData `json:"version"`
+		WorkerID       string           `json:"worker_id"`
+		AvailableRAM   uint64           `json:"available_ram"`
+		FreeDisk       uint64           `json:"free_workspace_disk"`
+		CPUPercent     float64          `json:"cpu_percent"`
+		UptimeSeconds  uint64           `json:"uptime_seconds"`
+		ActiveJobCount int              `json:"active_job_count"`
+		WorkerHealth   string           `json:"worker_health"`
+		Labels         []string         `json:"labels"`
+		Capabilities   []string         `json:"capabilities"`
+		Version        version.InfoData `json:"version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Malformed JSON", "")
@@ -405,6 +417,10 @@ func (c *Coordinator) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	worker.AvailableRAM = req.AvailableRAM
 	worker.FreeWorkspaceDisk = req.FreeDisk
+	worker.CPUPercent = req.CPUPercent
+	worker.UptimeSeconds = req.UptimeSeconds
+	worker.ActiveJobCount = req.ActiveJobCount
+	worker.WorkerHealth = req.WorkerHealth
 	if req.Labels != nil {
 		worker.Labels = append([]string{}, req.Labels...)
 	}
@@ -1064,17 +1080,17 @@ func (c *Coordinator) handleJobAction(w http.ResponseWriter, r *http.Request) {
 			// Worker claiming the job
 			token := r.Header.Get("Authorization")
 			token = strings.TrimPrefix(token, "Bearer ")
-			
+
 			var claimReq struct {
 				WorkerID string `json:"worker_id"`
 			}
 			json.NewDecoder(r.Body).Decode(&claimReq)
-			
+
 			reqWorkerID := claimReq.WorkerID
 			if reqWorkerID == "" {
 				reqWorkerID = r.URL.Query().Get("worker_id")
 			}
-			
+
 			// Backward compatibility: If old worker didn't send worker_id, but the job is explicitly assigned, try using the job's assigned worker.
 			if reqWorkerID == "" && job.WorkerID != "" {
 				reqWorkerID = job.WorkerID
@@ -1085,7 +1101,7 @@ func (c *Coordinator) handleJobAction(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Missing worker identity", "")
 				return
 			}
-			
+
 			worker, ok := c.Store.Workers[reqWorkerID]
 			if !ok || worker.TokenHash != hashToken(token) {
 				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", "")
@@ -1099,10 +1115,10 @@ func (c *Coordinator) handleJobAction(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusConflict, "CONFLICT", "Job is not pending", "")
 				return
 			}
-			
+
 			job.WorkerID = reqWorkerID
 			job.WorkerName = worker.NodeName
-			
+
 			// Atomically assign AttemptID
 			job.AttemptID = "attempt-" + cryptoRandomHex(16)
 			job.Status = models.StatusClaimed
@@ -1334,15 +1350,15 @@ func (c *Coordinator) handleBatchComputeTest(w http.ResponseWriter, r *http.Requ
 	}
 	c.Store.Mu.Lock()
 	defer c.Store.Mu.Unlock()
-	
+
 	for i := 0; i < 100; i++ {
 		jobID := "job-compute-" + cryptoRandomHex(8)
 		job := &models.Job{
-			ID:          jobID,
-			Task:        "compute.test",
-			Status:      models.StatusPending,
-			CreatedAt:   time.Now(),
-			Parameters:  map[string]string{"input": strconv.Itoa(100000 + i)},
+			ID:         jobID,
+			Task:       "compute.test",
+			Status:     models.StatusPending,
+			CreatedAt:  time.Now(),
+			Parameters: map[string]string{"input": strconv.Itoa(100000 + i)},
 		}
 		c.Store.Jobs[job.ID] = job
 	}

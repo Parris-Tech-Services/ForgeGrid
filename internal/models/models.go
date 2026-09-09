@@ -30,6 +30,10 @@ type WorkerState struct {
 	Status            string               `json:"status"` // online, offline
 	Drain             bool                 `json:"drain,omitempty"`
 	Disabled          bool                 `json:"disabled,omitempty"`
+	CPUPercent        float64              `json:"cpu_percent,omitempty"`
+	UptimeSeconds     uint64               `json:"uptime_seconds,omitempty"`
+	ActiveJobCount    int                  `json:"active_job_count,omitempty"`
+	WorkerHealth      string               `json:"worker_health,omitempty"`
 }
 
 type WorkerUpdateRequest struct {
@@ -120,8 +124,8 @@ type Job struct {
 	ChangedFiles      []ChangedFile      `json:"changed_files,omitempty"`
 	ValidationResults []ValidationResult `json:"validation_results,omitempty"`
 
-	AgentRequested    string `json:"agent_requested,omitempty"`
-	AgentActual       string `json:"agent_actual,omitempty"`
+	AgentRequested string `json:"agent_requested,omitempty"`
+	AgentActual    string `json:"agent_actual,omitempty"`
 
 	Challenge string `json:"challenge,omitempty"` // For test task
 }
@@ -240,6 +244,10 @@ type WorkerDTO struct {
 	TotalRAM          uint64               `json:"total_ram"`
 	AvailableRAM      uint64               `json:"available_ram"`
 	FreeWorkspaceDisk uint64               `json:"free_workspace_disk"`
+	CPUPercent        float64              `json:"cpu_percent,omitempty"`
+	UptimeSeconds     uint64               `json:"uptime_seconds,omitempty"`
+	ActiveJobCount    int                  `json:"active_job_count,omitempty"`
+	WorkerHealth      string               `json:"worker_health,omitempty"`
 	Labels            []string             `json:"labels,omitempty"`
 	Capabilities      []string             `json:"capabilities,omitempty"`
 	Version           version.InfoData     `json:"version"`
@@ -270,6 +278,10 @@ func (w *WorkerState) ToDTO() WorkerDTO {
 		TotalRAM:          w.TotalRAM,
 		AvailableRAM:      w.AvailableRAM,
 		FreeWorkspaceDisk: w.FreeWorkspaceDisk,
+		CPUPercent:        w.CPUPercent,
+		UptimeSeconds:     w.UptimeSeconds,
+		ActiveJobCount:    w.ActiveJobCount,
+		WorkerHealth:      w.WorkerHealth,
 		Labels:            append([]string{}, w.Labels...),
 		Capabilities:      append([]string{}, w.Capabilities...),
 		Version:           w.Version,
