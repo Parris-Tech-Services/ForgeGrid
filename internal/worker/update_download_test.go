@@ -105,6 +105,31 @@ func TestSetupClientGivesDownloadClientALongerTimeout(t *testing.T) {
 	}
 }
 
+// TestSetupClientGivesDownloadClientItsOwnTransport guards the fix for the
+// real Laptop03/Laptop04 canary failure: a standalone reproduction using a
+// fresh http.Transport succeeded instantly against the real coordinator on
+// the same hardware where the installed worker - whose DownloadClient
+// previously shared Client's Transport/connection pool, which Client reuses
+// continuously for polling every few seconds - got a silent zero-byte body.
+// Sharing a connection pool between frequent small polls and a rare large
+// download risks the download reusing a pooled keep-alive connection left in
+// a bad state by prior traffic. Each client must dial its own connections.
+func TestSetupClientGivesDownloadClientItsOwnTransport(t *testing.T) {
+	w := &Worker{}
+	w.SetupClient("some-fingerprint")
+	ct, ok := w.Client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Client.Transport is %T, want *http.Transport", w.Client.Transport)
+	}
+	dt, ok := w.DownloadClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("DownloadClient.Transport is %T, want *http.Transport", w.DownloadClient.Transport)
+	}
+	if ct == dt {
+		t.Fatal("Client and DownloadClient share the same *http.Transport (and therefore connection pool) - they must not")
+	}
+}
+
 // TestDownloadUpdateArtifactUsesDownloadClientNotClient proves the artifact
 // download actually goes through DownloadClient rather than the short-lived
 // Client used for polling/reporting: Client here has a near-zero timeout

@@ -437,16 +437,26 @@ func (w *Worker) SetupClient(fingerprint string) {
 		w.DownloadClient = &http.Client{Timeout: downloadClientTimeout}
 		return
 	}
-	tr := &http.Transport{
-		TLSClientConfig: network.PinTLSConfig(fingerprint),
-	}
+	// Client and DownloadClient deliberately do NOT share a Transport/connection
+	// pool. A standalone reproduction of this exact download using a fresh
+	// Transport succeeded instantly on the same real hardware where the
+	// installed worker (whose DownloadClient previously shared Client's
+	// Transport, reused continuously for polling every few seconds) got a
+	// silent zero-byte body. Sharing a connection pool between frequent small
+	// polls and rare large downloads risks the download reusing a pooled
+	// keep-alive connection left in a bad state by prior traffic; giving the
+	// download its own Transport means it always dials fresh.
 	w.Client = &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: tr,
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: network.PinTLSConfig(fingerprint),
+		},
 	}
 	w.DownloadClient = &http.Client{
-		Timeout:   downloadClientTimeout,
-		Transport: tr,
+		Timeout: downloadClientTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: network.PinTLSConfig(fingerprint),
+		},
 	}
 }
 
