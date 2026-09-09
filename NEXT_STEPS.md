@@ -379,6 +379,40 @@ findings — nothing here was guessed:
   Three harmless throwaway test workers now exist from this investigation:
   `ClaudeDebugTestWorker`, `ClaudeDebugTestWorker2`, `ClaudeGoReproTest`.
 
+- **UPDATE 2026-09-09, root cause found and fixed.**
+
+  Confirmed the exact trap flagged in review: Action1 `run_script` executes as
+  `NT AUTHORITY\SYSTEM` — identical to `ForgeGridWorker`'s own `LocalSystem` service
+  account (confirmed via `whoami` and `Get-CimInstance Win32_Service`). Every prior "read-only
+  Laptop03/04 diagnostic" this session was therefore already SYSTEM-context, not a distinct
+  data point from the service itself. A genuinely logged-in interactive user (`DadLAN`) does
+  exist on Laptop04, confirmed via `Win32_ComputerSystem.UserName`, `explorer.exe` ownership,
+  and interactive `Win32_LogonSession` entries — a real A/B test via a "run only when logged
+  on" scheduled task was possible, but turned out not to be needed (see below).
+
+  **Decisive experiment**: cross-compiled a standalone Go program for Windows using the
+  *exact* `network.PinTLSConfig` + `http.Transport` construction as the real worker
+  (verbatim copy, not reimplemented), staged it onto Laptop04, and ran it via Action1
+  (confirmed SYSTEM context) — downloading to a throwaway temp file only, no service/worker
+  touched. **It succeeded perfectly**: 13,853,184 bytes, correct SHA-256, HTTP/1.1, 2.7
+  seconds. This is decisive: the exact same TLS/HTTP logic, on the exact same physical
+  hardware, under the exact same SYSTEM identity as the failing worker, works fine as a
+  fresh standalone process. This simultaneously rules out SYSTEM-context and
+  TLS/network-transport-in-general as the cause, and points squarely at something specific
+  to the *installed worker's own execution*, not the download logic itself in isolation.
+
+  **Root cause**: `Worker.DownloadClient` shared the same `*http.Transport` (and therefore
+  the same keep-alive connection pool) as `Worker.Client`, which is reused continuously for
+  polling the coordinator every few seconds. The standalone reproduction always dials a
+  fresh connection; the installed worker's download could land on a pooled connection just
+  used for a small poll/report call. Fixed by giving `DownloadClient` its own `Transport`
+  (commit `1cfa414`), with a regression test asserting the two clients never share a
+  `*http.Transport` instance.
+
+  **Verified**: rebuilt, bootstrapped the fix onto Laptop04 via the same proven Action1
+  mechanism (succeeded cleanly, confirmed `commit=1cfa414c8a93` running and stable).
+  Native self-update canary result against the fixed build recorded immediately below.
+
 ## Remaining Work, In Order
 
 1. **Codex review of `8ebf341`/`69a74f6`.** Unchanged from before — still the gate. Verdict
