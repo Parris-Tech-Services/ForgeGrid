@@ -18,6 +18,9 @@ func TestLocalCandidatePathRejectsMissingAndDirPaths(t *testing.T) {
 	if got := localCandidatePath(filepath.Join(t.TempDir(), "does-not-exist.exe")); got != "" {
 		t.Fatalf("missing file: got %q, want empty", got)
 	}
+	if got := localCandidatePath("Windows/ForgeGrid.exe"); got != "" {
+		t.Fatalf("relative bundle path: got %q, want empty", got)
+	}
 	dir := t.TempDir()
 	if got := localCandidatePath(dir); got != "" {
 		t.Fatalf("directory: got %q, want empty (must be a regular file)", got)

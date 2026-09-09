@@ -1303,9 +1303,7 @@ func localCandidatePath(path string) string {
 		return ""
 	}
 	if !filepath.IsAbs(path) {
-		if abs, err := filepath.Abs(path); err == nil {
-			path = abs
-		}
+		return ""
 	}
 	if info, err := os.Stat(path); err != nil || info.IsDir() {
 		return ""
