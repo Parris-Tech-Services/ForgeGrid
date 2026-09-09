@@ -159,10 +159,51 @@ findings — nothing here was guessed:
   for code that would run as Local System on real physical hardware, no PowerShell has been
   run on any endpoint yet, and no service/executable on any machine has been touched via
   Action1 this round.
-- **Next action, if resumed:** get the real request schema for
-  `POST /automations/instances/{orgId}` with a `run_powershell` action (from the user, or a
-  verified fetch), then run a **read-only** diagnostic on Laptop #03 only (service name,
-  executable path, SHA-256, arch) before any stop/replace/restart sequence.
+- **UPDATE 2026-09-09, later same day: schema resolved, read-only discovery complete.**
+  The correct endpoint is `POST /policies/instances/{orgId}` (NOT `/automations/instances/`,
+  which is only for reading — a wrong assumption in the paragraph above has been corrected).
+  Recovered from two independent sources: Action1's own official `PSAction1` PowerShell
+  module (`https://github.com/Action1Corp/PSAction1`, cloned read-only for inspection —
+  `New-Action1 Remediation`/`DeploySoftware` both map to this path) and a real
+  `run_script` instance Josh created through the Action1 web UI (`$env:COMPUTERNAME` on
+  Laptop #03 only), fetched via `GET /policies/instances/{orgId}/{id}` and used as ground
+  truth for the exact `params` shape (`run_script_text`, `run_script_language`, `platform`,
+  `reboot_options`, etc.). Reproduced the same harmless command programmatically end-to-end
+  (POST → poll → output `DESKTOP-1M0IVQE`) before trusting it. Fixed and verified
+  `/home/josh/dev/action1/fedora/action1_client.py`'s `run_script()`, which had been posting
+  to the wrong endpoint with an unvalidated payload (only ever unit-tested against a mock,
+  never the real API) — commit `42dfe93` in that repo.
+
+  **Real read-only discovery run on Laptop #03** (via the now-fixed client, no writes):
+  - OS: Windows 10 Home, 64-bit, `10.0.19045`
+  - Service: `ForgeGridWorker` ("ForgeGrid Worker"), **Running**, StartMode Auto
+  - Executable: `C:\dev\6 Laptops\ForgeGrid\forgegrid.exe` (not `C:\Windows\system32` —
+    confirms the original caution against assuming that was warranted)
+  - Process: `ForgeGrid`, PID 4596, same path
+  - Executable SHA-256: `86A0E9CDF4B75BA0AEE0C597DFAADB32CAD29C6EA89868E0193CA7C09199D9D0`
+    (FileVersion/ProductVersion embedded in the binary are both empty — can't be used to
+    identify the build)
+  - Free disk on C: ~943.6 GB of ~1 TB
+
+  **Two open questions before the actual bootstrap write, not yet resolved:**
+  1. Go builds aren't byte-reproducible by default (build path/timestamp affect the hash),
+     so the SHA-256 above does **not** by itself prove whether Laptop03 is pre- or
+     post-`e1297cf`. The coordinator's own `NeedsUpdate()` (version+commit comparison) is
+     the authoritative source for this, but querying it (`/api/updates/status`,
+     `/api/workers`) requires the coordinator's admin Basic Auth token, which was
+     deliberately never extracted/persisted this round.
+  2. The coordinator's on-disk state (`forgegrid-data/coordinator.json`,
+     `forgegrid-data/workers.json`) hasn't been modified since **Aug 6**, despite the
+     coordinator process itself having been started fresh today (confirmed via
+     `/proc/<pid>/cwd` — same directory, so it's not a path mismatch) — meaning it's unclear
+     whether Laptop03's `ForgeGridWorker` service (confirmed *running* via Action1) is
+     actually currently *connected* to this coordinator instance, or just retrying. Worth
+     checking with the admin token before assuming connectivity.
+  3. The binary-staging mechanism (how a new ~13MB executable actually gets onto Laptop03
+     through Action1) hasn't been decided yet. Per the Security Notes below, do **not**
+     stand up another unauthenticated artifact route on the coordinator — a short-lived,
+     narrowly-scoped local file server for the transfer, torn down immediately after, is the
+     precedent that already worked safely in this rollout.
 
 ## Remaining Work, In Order
 
