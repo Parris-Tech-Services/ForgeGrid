@@ -554,6 +554,41 @@ findings — nothing here was guessed:
   `ClaudeDebugTestWorker2`, `ClaudeGoReproTest`, `ClaudeABTest`. No delete-worker endpoint
   exists; still just documented for later manual cleanup.
 
+- **UPDATE 2026-09-09, real Codex review attempted — genuinely blocked, gate still open.**
+
+  Per the correct call not to let hardware verification silently substitute for the
+  explicitly-pending independent review gate, attempted a real, non-interactive, adversarial
+  `codex review` of the full worker/coordinator update implementation (diff scope from
+  immediately before `0640a22` through current HEAD, with a detailed prompt covering the
+  full failure history, review checklist, and required `APPROVE` /
+  `APPROVE WITH NON-BLOCKING FINDINGS` / `REQUEST CHANGES` verdict format — this was a real
+  invocation of the installed `codex` CLI, not a simulated review written by Claude).
+
+  Hit three real, sequential blockers, each genuine (not guessed around):
+  1. `codex review --base <sha>` cannot be combined with a custom prompt (CLI argument
+     parser rejects it) — worked around by instructing Codex to run the `git diff` itself.
+  2. The account's configured default model (`gpt-6-astra`) requires a newer Codex CLI
+     version than what's installed (`0.151.0`; `0.153.4` available) — worked around by
+     selecting an explicitly-listed, non-upgrade-required model (`gpt-5.6-sol`) from
+     `~/.codex/models_cache.json`.
+  3. **Genuine ChatGPT/Codex usage quota exhaustion** — `"You've hit your usage limit...
+     try again at 6:58 PM."` This is an external account-level constraint, not something
+     more engineering effort resolves.
+
+  Investigated two alternatives rather than just giving up: `gh copilot` exists but requires
+  an interactive first-run download/install confirmation that cannot complete headlessly
+  (and its subscription/auth status is unverified); Antigravity IDE is GUI-only with no
+  discovered non-interactive review invocation (its settings/config are not exposed as
+  plain local files — see the earlier "stop asking permission" investigation in this same
+  session). Attempting `antigravity --help` non-interactively accidentally launched a
+  second, broken (expired-certificate) Antigravity instance at `/opt/antigravity/` —
+  cleanly killed, no lasting effect.
+
+  **The `[PENDING CODEX REVIEW]` gate remains formally open.** Per explicit instruction, no
+  third machine has been touched. The two-machine hardware proof (Laptop03, Laptop04) still
+  stands and was not altered. Retry the exact same `codex review` invocation (prompt saved
+  outside the repo, not committed) once the account's usage quota resets.
+
 ## Remaining Work, In Order
 
 1. **Codex review of `8ebf341`/`69a74f6`.** Unchanged from before — still the gate. Verdict
