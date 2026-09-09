@@ -205,6 +205,47 @@ findings — nothing here was guessed:
      narrowly-scoped local file server for the transfer, torn down immediately after, is the
      precedent that already worked safely in this rollout.
 
+- **UPDATE 2026-09-09, same day: Laptop03 bootstrap COMPLETE.** All three open questions
+  above are resolved:
+  1. Staleness was confirmed directly from the machine itself, with zero coordinator token
+     needed: `forgegrid.exe version` is a pure read-only command (first branch in `main()`,
+     prints and returns — confirmed by reading the source before relying on it). Running it
+     via Action1 showed Laptop03 was on `commit=0640a220d246`, confirmed via
+     `git merge-base --is-ancestor` to be a real ancestor of `e1297cf` — genuinely stale, not
+     assumed.
+  2. Coordinator connectivity: AVANCE-WS7's actual LAN IP (`10.245.173.178`) exactly matches
+     the coordinator address already embedded in Laptop03's worker command line — same
+     subnet, correct address, very likely actually connected (not just retrying blind).
+  3. Binary staging used the documented precedent exactly: a short-lived `python3 -m
+     http.server` bound to the LAN IP, serving only the one new binary, torn down
+     immediately after the transfer (confirmed unreachable afterward).
+
+  **Bootstrap sequence executed via a single Action1 `run_script` call** (with rollback
+  logic built into the script itself, precondition/postcondition SHA-256 checks at every
+  step): downloaded the new binary, verified its hash, backed up the running executable,
+  stopped `ForgeGridWorker`, replaced the binary, re-verified the hash, started the service,
+  confirmed it reached `Running`, confirmed the new process (new PID) was actually running
+  from the correct path, and confirmed `forgegrid.exe version` now reports
+  `commit=4c71dd004a23` (current HEAD — contains all `e1297cf` code; nothing code-relevant
+  changed since, only two docs commits). A follow-up check ~20s later confirmed the same
+  PID and start time — stable, not crash-looping.
+
+  New binary SHA-256: `3E1FBB17F99D226B5CD3043C3B56C4BAAA54040DE4F5C6568BE249F2853C7FB5`.
+  Backup preserved on Laptop03 at
+  `C:\dev\6 Laptops\ForgeGrid\forgegrid.exe.bak-20260909-130602`.
+
+  **Remaining gap for the full native-update canary proof**: queuing an update through
+  ForgeGrid's own mechanism requires `POST /api/updates/workers`, which is behind the
+  coordinator's admin Basic Auth — genuinely required this time (not optional), since that
+  endpoint is the entire point of the canary. The admin token was not found via any of the
+  legitimate local channels checked (process environment — no such variable exists; on-disk
+  `coordinator.json` — still missing the field, unchanged since Aug 6; no systemd unit or
+  `.env` file exists for this process). Options: Josh provides the token via a safer channel
+  than pasting it in chat (e.g., the dashboard directly), or authorizes a coordinator
+  restart (previously proven safe in this rollout — workers reconnect automatically within
+  a few heartbeats) so a freshly-generated token gets persisted to disk and can be read
+  locally.
+
 ## Remaining Work, In Order
 
 1. **Codex review of `8ebf341`/`69a74f6`.** Unchanged from before — still the gate. Verdict
