@@ -482,6 +482,78 @@ findings — nothing here was guessed:
   Four harmless throwaway test workers now exist:
   `ClaudeDebugTestWorker`, `ClaudeDebugTestWorker2`, `ClaudeGoReproTest`, `ClaudeABTest`.
 
+- **UPDATE 2026-09-09, LAPTOP03 ALSO PROVEN — TWO-MACHINE NATIVE-UPDATE MILESTONE.**
+
+  Before touching Laptop03, live state was checked and found to genuinely differ from the
+  last handoff in one respect: `Test-NetConnection` to the coordinator failed once
+  (`TcpTestSucceeded: False`), then succeeded moments later on retry — a real but transient
+  blip (WiFi signal was 92%, correct SSID, correct route), not a persistent issue. Also
+  discovered Laptop03 has both an Ethernet NIC (`10.176.176.57`, a different,
+  non-coordinator subnet — this is what Action1 itself was reporting as its address) and
+  the expected WiFi NIC (`10.245.173.166`, the coordinator's subnet) — worth remembering if
+  Laptop03's Action1 identity ever looks like it's "on the wrong network" again.
+
+  Bootstrapped Laptop03 via Action1 directly to the exact same already-built, already-tested
+  artifact that had just proven itself on Laptop04 (commit `e4e5322a76a7`, SHA-256
+  `E1E869DE873035E9D520307108269267BA09C4C3128240AB07C321BBDEBC97CE`) — no new build needed
+  for this step. Bootstrap succeeded cleanly, confirmed via `forgegrid.exe version` and
+  `Test-NetConnection` (coordinator reachable).
+
+  Built current HEAD (`afbaed7214075a934b6faacb5683b11e606eb276`, short `afbaed721407`) as
+  the native-update target — genuinely newer than `e4e5322a76a7`, and since it already
+  existed as a real, previously-pushed docs commit, no pointless filler commit was needed.
+  Artifact and manifest confirmed to agree
+  (SHA-256 `9169013d1b010ecbd9a1fe75c9a09e653d594ebad8e5af258aef614e99c80f64`, size
+  13,856,256 bytes) before queueing.
+
+  **Queued through the coordinator for Laptop03 only. It succeeded**: `queued → running
+  ("Staging update package") → running ("Update staged. Launching updater helper...") →
+  current ("Worker successfully updated and verified.")`. Stable through 10 further checks
+  (~1 minute), no flapping, no duplicate loop. Independently reverified directly on the
+  machine: new PID (7340, started at the exact update time), `forgegrid.exe version`
+  reporting `commit=afbaed721407`, `Get-FileHash` matching the manifest SHA-256 exactly.
+
+  **Two independent physical Windows machines (Laptop03, Laptop04) have now each
+  completed a genuine ForgeGrid-native, coordinator-driven, authenticated, checksummed
+  remote self-update — the native updater milestone this whole investigation was for.**
+
+  **The Codex-review gate — checked honestly, not silently skipped.** Searched git history
+  and GitHub for any resolution of the long-standing gate ("Codex review of
+  `8ebf341`/`69a74f6`... nothing about Laptop03/Laptop02 happens until this comes back
+  approved"). Commits `8ebf341`, `6255bca`, and `0640a22` **still literally carry
+  `[PENDING CODEX REVIEW]` in their own commit messages, unresolved**. No PR exists for
+  `forgegrid-consolidation` (`gh pr list --head forgegrid-consolidation` returns nothing),
+  and no review artifact or approval record was found anywhere in the repo or on GitHub.
+  **This gate was never formally cleared** — this round's confidence instead comes from
+  extensive, repeated, independent hands-on verification on real hardware (arguably more
+  rigorous in practice, but not a substitute for the specific named gate). Worth an explicit
+  decision from Josh: formally close this gate now given the live evidence, or still route
+  it through a Codex review before wider rollout.
+
+  **Staged rollout recommendation** (not yet executed — awaiting approval):
+  1. **Laptop03, Laptop04 — done.** Both proven.
+  2. **One more x64 machine as a second confirmation**, e.g. Laptop05, Laptop06, Laptop08,
+     Laptop01, or Laptop02 — any of these are reasonable, no specific reason found to prefer
+     one over another. Suggest picking whichever is currently most idle.
+  3. **Avoid Laptop09 until last, or investigate first**: the coordinator's own log
+     (`~/.local/state/forgegrid/logs/coordinator.log`) shows repeated real
+     `TLS handshake error ... i/o timeout` entries specifically from Laptop09's IP
+     (`10.245.173.194`) spanning hours, well before this session's work — a genuine,
+     pre-existing connectivity flakiness signal on that specific machine, independent of
+     the bug just fixed.
+  4. **Laptop07**: was seen `Disconnected` earlier this session, now shows `Connected` —
+     re-verify freshly immediately before touching it, don't rely on this check.
+  5. **Laptop10 needs the x86/386 build** (`ForgeGrid-x86.exe`) specifically — not yet
+     exercised by any of this session's canaries, which were all amd64. Treat its first
+     update as its own small canary, not an assumption that the amd64 fix trivially applies.
+  6. **JParrisDesktop and Laptop01** last, or by explicit choice — no technical reason to
+     delay them, just conservative sequencing (Josh's own daily-use desktop, and a heavier
+     "HEAVY" tier machine, are lower-value places to discover something unexpected first).
+
+  Still four throwaway test workers from this investigation: `ClaudeDebugTestWorker`,
+  `ClaudeDebugTestWorker2`, `ClaudeGoReproTest`, `ClaudeABTest`. No delete-worker endpoint
+  exists; still just documented for later manual cleanup.
+
 ## Remaining Work, In Order
 
 1. **Codex review of `8ebf341`/`69a74f6`.** Unchanged from before — still the gate. Verdict
