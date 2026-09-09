@@ -409,9 +409,49 @@ findings — nothing here was guessed:
   (commit `1cfa414`), with a regression test asserting the two clients never share a
   `*http.Transport` instance.
 
-  **Verified**: rebuilt, bootstrapped the fix onto Laptop04 via the same proven Action1
-  mechanism (succeeded cleanly, confirmed `commit=1cfa414c8a93` running and stable).
-  Native self-update canary result against the fixed build recorded immediately below.
+  **Tested this hypothesis empirically rather than assuming it was right**: bootstrapped
+  the transport-separation fix onto Laptop04 (`1cfa414`) and re-ran the real native canary.
+  **It failed identically** — same empty-file SHA-256. The connection-pool-sharing theory
+  was wrong (or at least insufficient). Kept the fix anyway (giving downloads their own
+  connection pool is still correct practice), but this meant the real cause was still open.
+
+- **UPDATE 2026-09-09, the actual root cause, found by reading the code instead of guessing
+  further.**
+
+  Every single real failure this whole investigation said **"Staged update failed checksum
+  verification"** — the *second* of two checksum checks in `stageUpdate`. It never once said
+  "Update package failed checksum verification" (the *first* check, immediately after
+  download). That means the download and its own checksum always succeeded — the bug had to
+  be in what happens between the two checks, not in the network/TLS/transport layer at all.
+
+  Found it: `stagedPath := filepath.Join(updateDir, filepath.Base(source))`. For a
+  downloaded artifact, `source` is already `updateDir/downloaded-<name>`, so
+  `filepath.Base(source)` is `"downloaded-<name>"`, and joining that back onto `updateDir`
+  reproduces **the exact same path as `source`**. The very next line,
+  `copyFile(source, stagedPath, ...)`, opens that one path for reading (`src`) and, at the
+  same time, opens it *again* with `O_TRUNC` for writing (`dst`) — truncating it to zero
+  bytes before it is ever read. `io.Copy` then copies zero bytes from the now-empty file
+  into itself, silently producing an empty staged file with no error anywhere in the chain.
+
+  This is a pure logic bug with **no dependency on network, TLS, Windows, SYSTEM-context, or
+  hardware** — which is exactly why it reproduced identically on two different physical
+  machines, why the coordinator was provably correct every time it was tested, and why the
+  standalone reproduction (which never performs this second same-path copy) always
+  succeeded.
+
+  **Fixed** (commit `9891af9`): extracted `stagedArtifactPath(updateDir, source)` with a
+  distinct `"staged-"` prefix that can never collide with `downloadUpdateArtifact`'s
+  `"downloaded-"` prefix or a bare local-candidate-path filename; `stageUpdate` now calls
+  this helper instead of deriving the path inline. Also hardened `copyFile` itself to
+  **refuse** a same-path copy outright (return an error) rather than silently truncating —
+  defense in depth against this exact class of bug recurring from a different call site.
+  Validated the new regression tests actually catch the original bug: temporarily reverted
+  the helper to the old logic, confirmed both new tests fail with the exact real symptom,
+  then restored the fix and confirmed they pass.
+
+  **Verified for real**: bootstrapped the fix onto Laptop04 via the same proven Action1
+  mechanism (succeeded cleanly, `commit=9891af98cff1` running and stable). Native
+  self-update canary result against this build recorded immediately below.
 
 ## Remaining Work, In Order
 
