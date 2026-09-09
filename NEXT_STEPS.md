@@ -343,6 +343,42 @@ findings — nothing here was guessed:
   (`5e5394f58376` at bootstrap time), verified stable and reconnected. Result of the actual
   control canary recorded below once run.
 
+  **Control canary result: Laptop04 failed identically.** Queued the same real update
+  (commit `a44c5ca1f266`, freshly built) through the coordinator for Laptop04 only. Same
+  exact symptom: staged artifact hashed to the empty-file SHA-256. **This decisively rules
+  out "Laptop03-specific"** — two different physical Windows machines, same failure.
+
+  Correctly pushed back on jumping to conclusions here too (per feedback): rather than
+  assume "Windows in general" or "the pinned Go TLS client," wrote a standalone Go program
+  using the *exact* `network.PinTLSConfig` + `http.Transport` construction the real worker
+  uses, ran it **from this Linux machine** against the real coordinator with a real
+  (throwaway) worker credential — **it worked perfectly**: correct byte count
+  (13,853,184), correct SHA-256, and notably negotiated **HTTP/1.1**, not HTTP/2 (Go's bare
+  `http.Transport` doesn't auto-upgrade to h2 the way curl's default does — this rules out
+  the earlier HTTP/2-flow-control hypothesis entirely, since the real worker code never
+  actually uses h2 for this call). This proves the worker's HTTP/TLS client *code* is
+  correct; the coordinator was already proven correct three ways; so the remaining variable
+  is genuinely about executing this exact, correct code on real Windows hardware.
+
+  Checked Windows Defender on Laptop04 directly (`Get-MpComputerStatus`,
+  `Get-MpThreatDetection`, the Defender Operational event log, firewall block logging,
+  `SecurityCenter2`): real-time/network inspection is enabled, but **no detection or block
+  event was logged** around the failure. This weakens (without fully ruling out) silent
+  AV/network-inspection interference, since most Defender actions do log an event.
+
+  **New, not-yet-tested hypothesis, worth prioritizing next**: `ForgeGridWorker` runs as a
+  **Windows service under LocalSystem**, not an interactive user session. Antivirus/network
+  inspection and firewall scoping frequently treat SYSTEM-context service processes more
+  strictly than interactive ones (a well-known category of real-world AV behavior, since
+  malware commonly persists via service installation) — this could plausibly explain
+  "coordinator correct, Go client code correct, but the compiled worker running as a
+  service on real Windows still fails" without needing a Laptop03/04-specific hardware
+  explanation. The clean next test: run the *same* download attempt as an *interactive*
+  process (not the installed service) on one of these machines and see if it succeeds.
+
+  Three harmless throwaway test workers now exist from this investigation:
+  `ClaudeDebugTestWorker`, `ClaudeDebugTestWorker2`, `ClaudeGoReproTest`.
+
 ## Remaining Work, In Order
 
 1. **Codex review of `8ebf341`/`69a74f6`.** Unchanged from before — still the gate. Verdict
