@@ -1129,7 +1129,7 @@ func (w *Worker) stageUpdate(req fgupdate.Request) {
 		return
 	}
 	rollbackPath := filepath.Join(updateDir, "rollback-"+filepath.Base(exe))
-	stagedPath := filepath.Join(updateDir, filepath.Base(source))
+	stagedPath := stagedArtifactPath(updateDir, source)
 	if err := copyFile(exe, rollbackPath, 0700); err != nil {
 		w.reportUpdate(req.ID, "failed", "Could not prepare rollback copy: "+err.Error(), false)
 		return
@@ -1210,6 +1210,23 @@ func filePathFromFileURL(p string) string {
 		}
 	}
 	return p
+}
+
+// stagedArtifactPath returns the path stageUpdate copies the resolved
+// update source into before its second, final checksum check. It must
+// never equal source: for a downloaded artifact, source is already
+// updateDir/downloaded-<name>, so naively joining updateDir with
+// filepath.Base(source) would reproduce that exact same path, and
+// copyFile(source, stagedPath, ...) opening one path for both reading and
+// O_TRUNC writing at once truncates it to zero bytes before ever reading
+// it - the exact empty-file bug found running the real Laptop03/Laptop04
+// canaries (every real failure said "Staged update failed checksum
+// verification", never "Update package failed", because the download and
+// its own first checksum check always succeeded). The "staged-" prefix is
+// distinct from downloadUpdateArtifact's "downloaded-" prefix and from any
+// bare local-candidate-path filename, so it can never collide with source.
+func stagedArtifactPath(updateDir, source string) string {
+	return filepath.Join(updateDir, "staged-"+filepath.Base(source))
 }
 
 // resolveUpdateSource returns a local, existing file path holding the
@@ -1300,6 +1317,13 @@ func (w *Worker) downloadUpdateArtifact(req fgupdate.Request, updateDir string) 
 }
 
 func copyFile(src, dst string, perm os.FileMode) error {
+	// Defense in depth against the exact bug found running the real
+	// Laptop03/Laptop04 canaries: opening the same path for reading and for
+	// O_TRUNC writing truncates it to zero bytes before it's ever read,
+	// silently producing an empty destination file with no error at all.
+	if filepath.Clean(src) == filepath.Clean(dst) {
+		return fmt.Errorf("copyFile: source and destination are the same path (%s); refusing to truncate it in place", src)
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
