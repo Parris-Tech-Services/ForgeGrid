@@ -234,17 +234,55 @@ findings — nothing here was guessed:
   Backup preserved on Laptop03 at
   `C:\dev\6 Laptops\ForgeGrid\forgegrid.exe.bak-20260909-130602`.
 
-  **Remaining gap for the full native-update canary proof**: queuing an update through
-  ForgeGrid's own mechanism requires `POST /api/updates/workers`, which is behind the
-  coordinator's admin Basic Auth — genuinely required this time (not optional), since that
-  endpoint is the entire point of the canary. The admin token was not found via any of the
-  legitimate local channels checked (process environment — no such variable exists; on-disk
-  `coordinator.json` — still missing the field, unchanged since Aug 6; no systemd unit or
-  `.env` file exists for this process). Options: Josh provides the token via a safer channel
-  than pasting it in chat (e.g., the dashboard directly), or authorizes a coordinator
-  restart (previously proven safe in this rollout — workers reconnect automatically within
-  a few heartbeats) so a freshly-generated token gets persisted to disk and can be read
-  locally.
+- **UPDATE 2026-09-09, later same day: coordinator restarted; found and fixed a real
+  download-timeout bug; native canary in progress.**
+
+  The admin-token gap above turned out to have a safer resolution than either option
+  offered: `scripts/start-controller.sh` already writes dashboard credentials to
+  `~/.config/forgegrid/coordinator/dashboard-login.txt` (0600 permissions) on every
+  startup, and the *currently running* coordinator (up since this morning) had already
+  written one there — no restart was needed just to get a token.
+
+  A restart turned out to be necessary anyway, for an unrelated and more important reason:
+  the running coordinator reported `commit=a93fc3600d3c`, which `git merge-base
+  --is-ancestor` confirms **predates `e1297cf`** — the coordinator had never been
+  rebuilt/restarted since before the artifact-download feature existed. It had simply never
+  come up in this session because nothing had needed the coordinator's new code path until
+  now. Restarted it (`kill` + relaunch via the same `setsid ./forgegrid -mode coordinator
+  -port 8080` pattern `start-controller.sh` uses); all 9 previously-connected machines
+  reconnected within ~20 seconds, confirmed via `ss -tn state established`, matching the
+  documented precedent exactly.
+
+  Queuing the update (`POST /api/updates/workers`) then correctly overwrote Laptop03's old
+  *stale, failed* pending request from 2026-09-08 (the original pre-`e1297cf` canary
+  failure, `open C:\Windows\system32\Windows\ForgeGrid.exe: ...`) with a fresh one — no
+  special cleanup needed, `WorkerUpdateRequest` is a single-slot field, not a list.
+
+  **First real attempt failed with a genuine bug, found and fixed, not worked around:**
+  `POST /api/updates/artifact` initially returned `401 Unauthorized` (the coordinator was
+  still on the pre-`e1297cf` build at that point). After the restart, the same call
+  succeeded (200) but the artifact staged on Laptop03 hashed to the SHA-256 of an *empty
+  file* — a completely silent zero-byte download with no error at all. Root-caused via
+  three independent, escalating reproductions before touching Laptop03 again: (1) an
+  in-process `httptest.NewRecorder()` call serving the real 13MB binary — passed; (2) the
+  same through a real `httptest.Server` (real TCP, real `http.Server`, no
+  coordinator-specific config) — passed; (3) registering a real throwaway test worker via
+  the legitimate pairing flow and curling the *actual live* coordinator over its real HTTPS
+  listener — got the exact right bytes and SHA-256. This conclusively ruled out the
+  coordinator. The real cause: `Worker.Client`'s overall `http.Client.Timeout` is 10
+  seconds — sized for small poll/report JSON calls — and was being reused for the artifact
+  download too, which isn't reliably enough time for a multi-MB transfer to a physical
+  remote machine (fast/local test environments never exposed this). Fixed by adding a
+  separate `Worker.DownloadClient` (same TLS-pinned transport, 5-minute timeout), used only
+  by `downloadUpdateArtifact`, with regression tests (`internal/worker`, commit `26d0ec8`).
+
+  Bootstrapped the fixed worker binary (commit `26d0ec846d4f`) onto Laptop03 the same way
+  as the first bootstrap (Action1 + short-lived local file server, torn down after) — this
+  step itself doesn't depend on the buggy download path, so it wasn't blocked by the bug it
+  was delivering the fix for. Confirmed via `forgegrid.exe version` and a stable
+  running process. **Next step, not yet done**: queue a genuinely newer build (this doc
+  update itself will be that commit) for Laptop03 and prove the *fixed* worker binary
+  completes the full authenticated-download canary end to end.
 
 ## Remaining Work, In Order
 
