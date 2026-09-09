@@ -450,8 +450,37 @@ findings — nothing here was guessed:
   then restored the fix and confirmed they pass.
 
   **Verified for real**: bootstrapped the fix onto Laptop04 via the same proven Action1
-  mechanism (succeeded cleanly, `commit=9891af98cff1` running and stable). Native
-  self-update canary result against this build recorded immediately below.
+  mechanism (succeeded cleanly, `commit=9891af98cff1` running and stable).
+
+  **THE NATIVE SELF-UPDATE CANARY SUCCEEDED.** Queued a genuinely newer build (`e4e5322`)
+  for Laptop04 through the coordinator's own `POST /api/updates/workers` — the full
+  ForgeGrid-native path, not Action1. The worker polled, downloaded via authenticated
+  `/api/updates/artifact`, staged correctly, verified, transactionally swapped, restarted,
+  and reconnected entirely on its own:
+
+  ```text
+  queued → running ("Staging update package")
+         → running ("Update staged. Launching updater helper...")
+         → current  ("Worker successfully updated and verified.")
+  ```
+
+  Stable at `status: current` / `current_commit: e4e5322a76a7` through 30 consecutive polls
+  (~2 minutes) — no flapping, no duplicate update loop. Independently reverified directly on
+  the machine (separately from the coordinator's own report): service `Running`, a **new**
+  process (PID 7164, started at the exact time of the update — not the earlier
+  Action1-bootstrapped process), `forgegrid.exe version` reporting `commit=e4e5322a76a7`, and
+  `Get-FileHash` matching the manifest's artifact SHA-256 exactly
+  (`E1E869DE873035E9D520307108269267BA09C4C3128240AB07C321BBDEBC97CE`).
+
+  **This is the decisive proof the whole multi-session investigation was for**: ForgeGrid's
+  coordinator-driven, authenticated, checksummed remote self-update genuinely works on real
+  Windows hardware. Laptop03 has not yet been retried with this fix (only Laptop04 has been
+  proven) — retrying Laptop03 is the natural, low-risk next step before considering any
+  wider rollout, since it was never actually the "special case" everyone (correctly)
+  suspected it might not be.
+
+  Four harmless throwaway test workers now exist:
+  `ClaudeDebugTestWorker`, `ClaudeDebugTestWorker2`, `ClaudeGoReproTest`, `ClaudeABTest`.
 
 ## Remaining Work, In Order
 
