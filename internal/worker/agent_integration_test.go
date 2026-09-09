@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
 )
 
 func TestFakeAgentIntegrationPipeline(t *testing.T) {
@@ -23,7 +22,7 @@ func TestFakeAgentIntegrationPipeline(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.WriteFile(filepath.Join(remoteRepo, "README.md"), []byte("Hello"), 0644)
-	
+
 	gitScript := `#!/bin/bash
 git init
 git branch -m main
@@ -34,7 +33,7 @@ git commit -m "Initial commit"
 `
 	scriptPath := filepath.Join(remoteRepo, "setup.sh")
 	os.WriteFile(scriptPath, []byte(gitScript), 0755)
-	
+
 	cmd := exec.Command("bash", "./setup.sh")
 	cmd.Dir = remoteRepo
 	if err := cmd.Run(); err != nil {
@@ -43,11 +42,18 @@ git commit -m "Initial commit"
 
 	// Coordinator mock
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/worker/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+	// Real path is plural ("/api/workers/heartbeat"); this mock previously
+	// registered the singular form, so every heartbeat silently fell
+	// through to the catch-all handler below instead of this one.
+	mux.HandleFunc("/api/workers/heartbeat", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{}`))
 	})
-	
+	mux.HandleFunc("/api/updates/worker", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"update": null}`))
+	})
+
 	// Mock job assignment
 	jobAssigned := false
 	mux.HandleFunc("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +64,7 @@ git commit -m "Initial commit"
 		}
 		jobAssigned = true
 		w.Header().Set("Content-Type", "application/json")
-		
+
 		w.Write([]byte(`[{
 			"id": "job-fake-1",
 			"status": "PENDING",

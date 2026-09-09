@@ -11,25 +11,41 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"forgegrid/internal/network"
 )
 
 type UpdateTransaction struct {
-	ID               string    `json:"transaction_id"`
-	WorkerID         string    `json:"worker_id"`
-	OldBinaryPath    string    `json:"old_binary_path"`
-	NewBinaryPath    string    `json:"new_binary_path"`
-	BackupBinaryPath string    `json:"backup_binary_path"`
-	ExpectedSHA256   string    `json:"expected_sha256"`
-	OldSHA256        string    `json:"old_sha256"`
-	CurrentState     string    `json:"current_state"`
-	StartedAt        time.Time `json:"started_at"`
-	RestartDeadline  time.Time `json:"restart_deadline"`
-	RollbackReason   string    `json:"rollback_reason"`
-	WorkerPID        int       `json:"worker_pid"`
-	LifecycleMode    string    `json:"lifecycle_mode"`
+	ID                string    `json:"transaction_id"`
+	WorkerID          string    `json:"worker_id"`
+	OldBinaryPath     string    `json:"old_binary_path"`
+	NewBinaryPath     string    `json:"new_binary_path"`
+	BackupBinaryPath  string    `json:"backup_binary_path"`
+	UpdaterHelperPath string    `json:"updater_helper_path"`
+	ExpectedSHA256    string    `json:"expected_sha256"`
+	OldSHA256         string    `json:"old_sha256"`
+	CurrentState      string    `json:"current_state"`
+	StartedAt         time.Time `json:"started_at"`
+	RestartDeadline   time.Time `json:"restart_deadline"`
+	RollbackReason    string    `json:"rollback_reason"`
+	WorkerPID         int       `json:"worker_pid"`
+	LifecycleMode     string    `json:"lifecycle_mode"`
+}
+
+// launchUpdaterHelper starts the standalone updater helper binary (a copy
+// of the worker executable, made before the swap so it survives the swap
+// independently of whichever file is currently at OldBinaryPath) in
+// "-mode update-helper", which runs RunUpdater(). It is a package variable
+// so tests can substitute a stub instead of spawning a real process.
+var launchUpdaterHelper = func(path string) error {
+	cmd := exec.Command(path, "-mode", "update-helper")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Start()
 }
 
 func getTxPath() string {
@@ -86,8 +102,18 @@ func reportTxState(tx *UpdateTransaction) {
 	if err == nil {
 		req.Header.Set("Authorization", "Bearer "+creds.Token)
 		client := &http.Client{Timeout: 5 * time.Second}
+		// Match the same TLS model the rest of the worker uses (see
+		// Worker.SetupClient): a bare default client verifies against the
+		// system CA pool, which a self-signed coordinator certificate will
+		// never pass, so every one of these state-change reports would
+		// silently fail the TLS handshake whenever the worker is running
+		// in its normal, non-insecure, fingerprint-pinned configuration -
+		// only the deliberately-insecure case ever actually reached the
+		// coordinator.
 		if creds.Insecure {
 			client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+		} else if creds.Fingerprint != "" {
+			client.Transport = &http.Transport{TLSClientConfig: network.PinTLSConfig(creds.Fingerprint)}
 		}
 		client.Do(req)
 	}
@@ -129,7 +155,16 @@ func RunUpdater() {
 
 	if tx.CurrentState == "STAGED" {
 		tx.CurrentState = "APPLYING"
-		writeTx(tx)
+		if err := writeTx(tx); err != nil {
+			// Nothing destructive has happened yet - the on-disk
+			// transaction still honestly says STAGED (writeTx's
+			// write-to-.tmp-then-rename never touches the original file
+			// on failure), so it is safer to stop here than to swap
+			// binaries with no durable record of having started.
+			log.Printf("[Update] Could not persist APPLYING state; aborting before touching any binaries: %v", err)
+			osExit(1)
+			return
+		}
 
 		log.Printf("[Update] Swapping binaries...")
 		if err := swapBinaries(tx); err != nil {
@@ -139,7 +174,15 @@ func RunUpdater() {
 		}
 
 		tx.CurrentState = "RESTARTING"
-		writeTx(tx)
+		if err := writeTx(tx); err != nil {
+			// The binaries are already swapped at this point: we cannot
+			// pretend that never happened, so this must go through
+			// rollback() rather than just logging and continuing as if
+			// the state had been durably recorded.
+			tx.RollbackReason = "Could not persist RESTARTING state after swap: " + err.Error()
+			rollback(tx)
+			return
+		}
 
 		log.Printf("[Update] Starting candidate worker...")
 		if err := GetLifecycle(tx.LifecycleMode).Start(tx); err != nil {
@@ -149,7 +192,11 @@ func RunUpdater() {
 		}
 
 		tx.CurrentState = "VERIFYING_NEW_WORKER"
-		writeTx(tx)
+		if err := writeTx(tx); err != nil {
+			tx.RollbackReason = "Could not persist VERIFYING_NEW_WORKER state after starting candidate: " + err.Error()
+			rollback(tx)
+			return
+		}
 	}
 
 	if tx.CurrentState == "VERIFYING_NEW_WORKER" {
@@ -231,22 +278,52 @@ func waitForHealth(tx *UpdateTransaction) error {
 	for time.Now().Before(deadline) {
 		time.Sleep(2 * time.Second)
 		current, err := readTx()
-		if err == nil && current.CurrentState == "COMPLETED" {
+		if err != nil {
+			continue
+		}
+		if current.CurrentState == "COMPLETED" {
 			return nil
+		}
+		// The candidate worker itself already detected a failed
+		// verification and triggered its own rollback (see
+		// Worker.failCandidateVerification): stop waiting out the rest of
+		// this deadline and let the caller's rollback() call become a
+		// no-op against already-resolved state, rather than silently
+		// racing a second safeReplace against the one already underway.
+		if current.CurrentState == "ROLLING_BACK" || current.CurrentState == "ROLLED_BACK" || current.CurrentState == "ROLLBACK_FAILED" {
+			return fmt.Errorf("candidate already triggered its own rollback: %s", current.RollbackReason)
 		}
 	}
 	return fmt.Errorf("timeout waiting for healthy heartbeat from new worker")
 }
 
 func rollback(tx *UpdateTransaction) {
+	// Re-read the latest on-disk state rather than trusting only the
+	// in-memory tx the caller holds: this function can legitimately be
+	// invoked twice for the same transaction from two different processes
+	// (the original updater helper's waitForHealth() deadline, and the
+	// candidate worker's own failCandidateVerification() relaunching a
+	// fresh helper). If a prior call already finished, safeReplace()ing a
+	// second time would try to move BackupBinaryPath again after it has
+	// already been consumed, fail, and overwrite an honest ROLLED_BACK
+	// with a misleading ROLLBACK_FAILED even though the binary itself is
+	// fine - so bail out early once the transaction is already resolved.
+	if current, err := readTx(); err == nil && current.ID == tx.ID {
+		switch current.CurrentState {
+		case "ROLLED_BACK", "ROLLBACK_FAILED", "COMPLETED":
+			log.Printf("[Update] Rollback already resolved (state=%s); skipping duplicate rollback", current.CurrentState)
+			return
+		}
+	}
+
 	log.Printf("[Update] Rolling back: %s", tx.RollbackReason)
 	tx.CurrentState = "ROLLING_BACK"
-	writeTx(tx)
+	logWriteTxErr(tx, "ROLLING_BACK")
 
 	if err := safeReplace(tx.BackupBinaryPath, tx.OldBinaryPath); err != nil {
 		tx.CurrentState = "ROLLBACK_FAILED"
 		tx.RollbackReason = tx.RollbackReason + " | restore from backup failed: " + err.Error()
-		writeTx(tx)
+		logWriteTxErr(tx, "ROLLBACK_FAILED (restore)")
 		log.Printf("[Update] Rollback FAILED to restore the previous binary: %v", err)
 		return
 	}
@@ -255,14 +332,29 @@ func rollback(tx *UpdateTransaction) {
 	if err := GetLifecycle(tx.LifecycleMode).Start(tx); err != nil {
 		tx.CurrentState = "ROLLBACK_FAILED"
 		tx.RollbackReason = tx.RollbackReason + " | restart of restored binary failed: " + err.Error()
-		writeTx(tx)
+		logWriteTxErr(tx, "ROLLBACK_FAILED (restart)")
 		log.Printf("[Update] Rollback FAILED to restart the previous worker: %v", err)
 		return
 	}
 
 	tx.CurrentState = "ROLLED_BACK"
-	writeTx(tx)
+	logWriteTxErr(tx, "ROLLED_BACK")
 	log.Printf("[Update] Rollback initiated. Waiting for previous worker to verify...")
+}
+
+// logWriteTxErr persists tx and, on failure, logs it clearly rather than
+// silently discarding the error - a transactional updater must not
+// pretend state was durably recorded when the write itself failed. The
+// destructive file operations around each of these call sites still need
+// to proceed regardless (leaving a backup un-restored because we also
+// couldn't write a status file would be worse), so this only logs; it
+// does not change control flow the way the STAGED-branch checks in
+// RunUpdater do, since those run before anything destructive has
+// happened and can safely abort instead.
+func logWriteTxErr(tx *UpdateTransaction, context string) {
+	if err := writeTx(tx); err != nil {
+		log.Printf("[Update] Could not persist transaction state (%s): %v", context, err)
+	}
 }
 
 type WorkerStatus struct {

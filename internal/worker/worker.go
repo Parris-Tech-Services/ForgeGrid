@@ -677,7 +677,8 @@ func (w *Worker) verifyUpdateTransaction() {
 	hash, err := fileSHA256(exe)
 	if err != nil || hash != tx.ExpectedSHA256 {
 		log.Printf("[Update] Candidate failed health verification: running hash %s did not match expected %s", hash, tx.ExpectedSHA256)
-		os.Exit(1)
+		w.failCandidateVerification(tx, fmt.Sprintf("running hash %s did not match expected %s", hash, tx.ExpectedSHA256))
+		return
 	}
 
 	// Wait briefly to ensure any prior connection closes, then send heartbeat
@@ -687,7 +688,8 @@ func (w *Worker) verifyUpdateTransaction() {
 	status, _ := readStatus()
 	if status == nil || status.State != "heartbeat_ok" {
 		log.Printf("[Update] Candidate failed health verification: could not reconnect to coordinator")
-		os.Exit(1)
+		w.failCandidateVerification(tx, "could not reconnect to coordinator")
+		return
 	}
 
 	log.Printf("[Update] Candidate verified")
@@ -696,6 +698,40 @@ func (w *Worker) verifyUpdateTransaction() {
 	tx.CurrentState = "COMPLETED"
 	writeTx(tx)
 	log.Printf("[Update] Transaction completed")
+}
+
+// osExit is a package variable, not a direct os.Exit call, so tests can
+// override it to observe a failed-verification path without actually
+// terminating the test binary.
+var osExit = os.Exit
+
+// failCandidateVerification handles a candidate worker (the newly-swapped
+// binary, already running as OldBinaryPath) failing its own post-swap
+// health check. It used to just call os.Exit(1): on a real Windows
+// service, the SCM would then restart the same (still broken) candidate
+// binary, which would fail this same check again, forever - with the
+// verified-good backup sitting right there unused, since nothing ever
+// initiated a rollback. The candidate process cannot safely rename or
+// delete its own executable file while it's running (Windows keeps a
+// running exe's file locked), so it cannot call rollback() directly:
+// instead it marks the transaction ROLLING_BACK and relaunches the
+// standalone updater helper binary (a separate file, unaffected by the
+// lock on the candidate's own exe) to perform the actual rollback, then
+// exits so the helper's rename can succeed. This reuses the exact same
+// ROLLING_BACK handling RunUpdater() already has for the case where the
+// original helper's own waitForHealth() deadline expires instead.
+func (w *Worker) failCandidateVerification(tx *UpdateTransaction, reason string) {
+	tx.RollbackReason = "Candidate failed health verification: " + reason
+	tx.CurrentState = "ROLLING_BACK"
+	if err := writeTx(tx); err != nil {
+		log.Printf("[Update] Could not persist ROLLING_BACK state: %v", err)
+	}
+	if tx.UpdaterHelperPath == "" {
+		log.Printf("[Update] No updater helper path recorded for this transaction; cannot relaunch to roll back")
+	} else if err := launchUpdaterHelper(tx.UpdaterHelperPath); err != nil {
+		log.Printf("[Update] Could not relaunch updater helper to roll back: %v", err)
+	}
+	osExit(1)
 }
 
 func (w *Worker) cleanupUpdateFiles() {
@@ -738,6 +774,7 @@ func (w *Worker) heartbeatLoop() {
 	defer ticker.Stop()
 	for {
 		w.sendHeartbeat()
+		w.retryPendingUpdateReport()
 		select {
 		case <-w.stopCh:
 			return
@@ -1117,21 +1154,145 @@ func (w *Worker) pollUpdateRequest() {
 	go w.stageUpdate(*body.Update)
 }
 
-func (w *Worker) reportUpdate(updateID, status, message string, rollbackReady bool) {
-	reqBody := map[string]interface{}{
-		"worker_id":      w.WorkerID,
-		"update_id":      updateID,
-		"status":         status,
-		"message":        message,
-		"rollback_ready": rollbackReady,
+// terminalUpdateStatuses are the statuses worth durably retrying: once one
+// of these is accepted, the coordinator's view of this update request is
+// final and nothing will report it again on its own.
+var terminalUpdateStatuses = map[string]bool{
+	"completed":       true,
+	"failed":          true,
+	"rolled_back":     true,
+	"rollback_failed": true,
+}
+
+func pendingReportPath() string {
+	return filepath.Join(getWorkerDataDir(), "pending_update_report.json")
+}
+
+type pendingUpdateReport struct {
+	WorkerID      string `json:"worker_id"`
+	UpdateID      string `json:"update_id"`
+	Status        string `json:"status"`
+	Message       string `json:"message"`
+	RollbackReady bool   `json:"rollback_ready"`
+}
+
+// reportUpdate tells the coordinator about this update's status. A fire-
+// and-forget POST here previously meant that if the single terminal report
+// (completed/failed/rolled_back/rollback_failed) was lost to a transport
+// error or a non-2xx response, the worker would go on running perfectly
+// healthy while the coordinator's /api/updates/status stayed stuck showing
+// "running"/"queued" forever - nothing else was ever going to tell it
+// otherwise. This now checks the HTTP response, retries a bounded number
+// of times with a short backoff (small enough to never meaningfully block
+// worker startup, since this is on that path via verifyUpdateTransaction),
+// and - for a terminal status specifically - persists an unacknowledged
+// report to disk so retryPendingUpdateReport (called from the ordinary
+// heartbeat loop, which already runs continuously) keeps retrying it after
+// process restarts too, until the coordinator actually acknowledges it.
+// The coordinator's handleWorkerUpdateReport just overwrites the same
+// fields on a resend, so duplicate delivery is safe.
+func (w *Worker) reportUpdate(updateID, status, message string, rollbackReady bool) bool {
+	rep := pendingUpdateReport{
+		WorkerID:      w.WorkerID,
+		UpdateID:      updateID,
+		Status:        status,
+		Message:       message,
+		RollbackReady: rollbackReady,
 	}
-	body, _ := json.Marshal(reqBody)
-	req, _ := http.NewRequest("POST", w.CoordinatorURL+"/api/updates/report", bytes.NewReader(body))
+
+	backoff := []time.Duration{0, 500 * time.Millisecond, time.Second}
+	acked := false
+	for _, delay := range backoff {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		if w.sendUpdateReportOnce(rep) {
+			acked = true
+			break
+		}
+	}
+
+	if acked {
+		w.clearPendingUpdateReportIfMatches(updateID)
+		return true
+	}
+
+	if terminalUpdateStatuses[status] {
+		log.Printf("[Update] Could not deliver terminal report %q for %s after retries; will keep retrying from the heartbeat loop", status, updateID)
+		if err := writePendingUpdateReport(rep); err != nil {
+			log.Printf("[Update] Could not persist pending report for later retry: %v", err)
+		}
+	}
+	return false
+}
+
+func writePendingUpdateReport(rep pendingUpdateReport) error {
+	if err := os.MkdirAll(getWorkerDataDir(), 0700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(rep)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(pendingReportPath(), b, 0600)
+}
+
+// sendUpdateReportOnce makes exactly one attempt and reports whether the
+// coordinator acknowledged it (2xx). A 404 (update request superseded by a
+// newer one, or worker/coordinator state reset) is treated the same as
+// success for the caller's retry purposes: there is nothing left to
+// deliver this report to.
+func (w *Worker) sendUpdateReportOnce(rep pendingUpdateReport) bool {
+	body, _ := json.Marshal(rep)
+	req, err := http.NewRequest("POST", w.CoordinatorURL+"/api/updates/report", bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+w.Token)
 	resp, err := w.Client.Do(req)
-	if err == nil {
-		resp.Body.Close()
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return true
+	}
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func (w *Worker) clearPendingUpdateReportIfMatches(updateID string) {
+	pending, err := readPendingUpdateReport()
+	if err != nil || pending.UpdateID != updateID {
+		return
+	}
+	os.Remove(pendingReportPath())
+}
+
+func readPendingUpdateReport() (*pendingUpdateReport, error) {
+	b, err := os.ReadFile(pendingReportPath())
+	if err != nil {
+		return nil, err
+	}
+	var rep pendingUpdateReport
+	if err := json.Unmarshal(b, &rep); err != nil {
+		return nil, err
+	}
+	return &rep, nil
+}
+
+// retryPendingUpdateReport is called once per heartbeat tick (every 5s,
+// via the loop already running for the life of the worker) so a terminal
+// update report that failed all of reportUpdate's immediate bounded
+// retries still eventually reaches the coordinator once connectivity
+// recovers, without anything having to block waiting for that to happen.
+func (w *Worker) retryPendingUpdateReport() {
+	pending, err := readPendingUpdateReport()
+	if err != nil {
+		return
+	}
+	if w.sendUpdateReportOnce(*pending) {
+		os.Remove(pendingReportPath())
 	}
 }
 
@@ -1197,17 +1358,18 @@ func (w *Worker) stageUpdate(req fgupdate.Request) {
 	}
 
 	tx := &UpdateTransaction{
-		ID:               req.ID,
-		WorkerID:         w.WorkerID,
-		OldBinaryPath:    exe,
-		NewBinaryPath:    stagedPath,
-		BackupBinaryPath: filepath.Join(filepath.Dir(exe), "previous-"+filepath.Base(exe)),
-		ExpectedSHA256:   req.Artifact.SHA256,
-		CurrentState:     "STAGED",
-		StartedAt:        time.Now(),
-		RestartDeadline:  time.Now().Add(60 * time.Second),
-		WorkerPID:        os.Getpid(),
-		LifecycleMode:    DetectCurrentLifecycle(),
+		ID:                req.ID,
+		WorkerID:          w.WorkerID,
+		OldBinaryPath:     exe,
+		NewBinaryPath:     stagedPath,
+		BackupBinaryPath:  filepath.Join(filepath.Dir(exe), "previous-"+filepath.Base(exe)),
+		UpdaterHelperPath: updaterPath,
+		ExpectedSHA256:    req.Artifact.SHA256,
+		CurrentState:      "STAGED",
+		StartedAt:         time.Now(),
+		RestartDeadline:   time.Now().Add(60 * time.Second),
+		WorkerPID:         os.Getpid(),
+		LifecycleMode:     DetectCurrentLifecycle(),
 	}
 
 	// Prepare rollback backup
@@ -1226,10 +1388,7 @@ func (w *Worker) stageUpdate(req fgupdate.Request) {
 	}
 
 	log.Printf("[Update] Launching update helper")
-	cmd := exec.Command(updaterPath, "-mode", "update-helper")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
+	if err := launchUpdaterHelper(updaterPath); err != nil {
 		w.reportUpdate(req.ID, "failed", "Could not launch updater: "+err.Error(), true)
 		return
 	}

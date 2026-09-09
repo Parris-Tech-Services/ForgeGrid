@@ -10,17 +10,16 @@ import (
 
 func TestUpdaterTransaction(t *testing.T) {
 	tmp := t.TempDir()
-	os.Setenv("USERPROFILE", tmp)
-	os.Setenv("HOME", tmp)
+	setSandboxedDataDir(t, tmp)
 
 	tx := &UpdateTransaction{
-		ID:               "tx-123",
-		CurrentState:     "STAGED",
-		ExpectedSHA256:   "abcd",
-		LifecycleMode:    "portable",
-		RestartDeadline:  time.Now().Add(60 * time.Second),
+		ID:              "tx-123",
+		CurrentState:    "STAGED",
+		ExpectedSHA256:  "abcd",
+		LifecycleMode:   "portable",
+		RestartDeadline: time.Now().Add(60 * time.Second),
 	}
-	
+
 	// Create mock updates dir
 	os.MkdirAll(filepath.Join(getWorkerDataDir(), "updates"), 0755)
 
@@ -37,8 +36,7 @@ func TestUpdaterTransaction(t *testing.T) {
 
 func TestUpdaterCleanup(t *testing.T) {
 	tmp := t.TempDir()
-	os.Setenv("USERPROFILE", tmp)
-	os.Setenv("HOME", tmp)
+	setSandboxedDataDir(t, tmp)
 
 	w := &Worker{}
 	updateDir := filepath.Join(getWorkerDataDir(), "updates")
@@ -58,12 +56,12 @@ func TestUpdaterCleanup(t *testing.T) {
 
 func TestRecoveryStates(t *testing.T) {
 	tmp := t.TempDir()
-	os.Setenv("USERPROFILE", tmp)
-	os.Setenv("HOME", tmp)
+	setSandboxedDataDir(t, tmp)
+	useFakeLifecycle(t, nil)
 
 	updateDir := filepath.Join(getWorkerDataDir(), "updates")
 	os.MkdirAll(updateDir, 0755)
-	
+
 	primary := filepath.Join(tmp, "primary.exe")
 	backup := filepath.Join(tmp, "previous-primary.exe")
 	candidate := filepath.Join(tmp, "candidate.exe")
@@ -81,12 +79,12 @@ func TestRecoveryStates(t *testing.T) {
 		LifecycleMode:    "portable",
 		RestartDeadline:  time.Now().Add(60 * time.Second),
 	}
-	
+
 	err := swapBinaries(tx)
 	if err != nil {
 		t.Fatalf("Failed to swap: %v", err)
 	}
-	
+
 	b, _ := os.ReadFile(primary)
 	if string(b) != "candidate" {
 		t.Fatalf("Primary is not candidate")
@@ -103,8 +101,8 @@ func TestRecoveryStates(t *testing.T) {
 
 func TestRollbackReportsFailureInsteadOfImplyingRecovery(t *testing.T) {
 	tmp := t.TempDir()
-	os.Setenv("USERPROFILE", tmp)
-	os.Setenv("HOME", tmp)
+	setSandboxedDataDir(t, tmp)
+	useFakeLifecycle(t, nil)
 
 	updateDir := filepath.Join(getWorkerDataDir(), "updates")
 	os.MkdirAll(updateDir, 0755)
