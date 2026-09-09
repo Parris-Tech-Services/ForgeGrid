@@ -330,6 +330,19 @@ findings — nothing here was guessed:
   exists yet, so they remain in the fleet list as obviously-named, permanently-offline
   entries until manually cleaned up (or such an endpoint is added).
 
+- **UPDATE 2026-09-09, control-canary experiment in progress.** Correctly pushed back on
+  calling "Laptop03 WiFi" a proven root cause — the PowerShell/.NET TLS failure on Laptop03
+  is a different client stack than the Go worker's own (demonstrably working) HTTPS calls,
+  so it doesn't by itself explain the Go worker's empty-download result. Running a control
+  experiment instead: bootstrap a **second** Windows x64 machine (Laptop04, HP 4230s,
+  `DESKTOP-T011TJ5`, endpoint id `bde1eced-f21e-464e-bf93-295996501f6f`) to the same fixed
+  worker build via the same proven Action1 mechanism, then run the identical native
+  self-update canary against it. Laptop02 was also a viable candidate; Laptop04 was chosen
+  arbitrarily between two equally-good options. Laptop04 bootstrapped cleanly (was on stale
+  commit `6255bca43cf3`, confirmed a real ancestor of `e1297cf`) to current HEAD
+  (`5e5394f58376` at bootstrap time), verified stable and reconnected. Result of the actual
+  control canary recorded below once run.
+
 ## Remaining Work, In Order
 
 1. **Codex review of `8ebf341`/`69a74f6`.** Unchanged from before — still the gate. Verdict
