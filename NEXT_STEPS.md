@@ -1,8 +1,33 @@
 # ForgeGrid / DadLAN Fleet — Status and Remaining Work
 
-_Last updated: 2026-09-04, branch `forgegrid-consolidation`, HEAD `a93fc3600d3c` (code) /
+_Last updated: 2026-09-09, branch `forgegrid-consolidation`, HEAD `e1297cf586ad` (code) /
 verify against `git log -1` for the true current HEAD — this file is updated at each
 milestone, not on every commit._
+
+## Session Continuity (JoshMemory) — new this round
+
+A fresh Claude Code/Codex/Antigravity session no longer needs a pasted transcript to resume
+this project. `/home/josh/dev/JoshMemory` (a separate, pre-existing local project/memory
+index) gained a **structured handoff** layer this round, built on its existing
+`project_facts` table (subject/status/confidence/supersedes — reused, not duplicated):
+
+- `save_handoff` (MCP tool + `joshmemory save-handoff` CLI) persists a structured
+  objective/completed/in_progress/blockers/next_action/commits record for a project,
+  superseding (not erasing) the previous one. Every string field is redacted through
+  JoshMemory's existing secret-pattern filter before storage.
+- `get_project_context` / `joshmemory get-context` returns the latest handoff **plus a
+  freshly-checked live git snapshot**, and explicitly flags any discrepancy (e.g. handoff
+  says HEAD X, live HEAD is Y) rather than trusting the handoff. Live evidence always wins.
+- Claude Code now has JoshMemory registered as a user-scoped MCP server (`claude mcp list`),
+  plus a `SessionStart` hook that injects the latest ForgeGrid handoff automatically, and a
+  `Stop` hook that nudges (once per commit, never loops) to save a checkpoint after new
+  commits land without one. Codex already had JoshMemory wired as an MCP server
+  (`~/.codex/config.toml`) from before this round; it just didn't have the new tools until
+  now. Antigravity's MCP/hook config was not found/verified this round — remaining gap.
+- A real handoff for **this** project (ForgeGrid, this HEAD) was saved during this round as
+  the first proof the system works — see JoshMemory's `get-context --project ForgeGrid`.
+
+Full detail: `/home/josh/dev/JoshMemory/README.md` and `joshmemory/handoff.py`/`hooks.py`.
 
 This document is the current, verified state of the DadLAN ForgeGrid rollout and
 everything still left to do. Everything under "Current State" was checked against the
@@ -110,11 +135,42 @@ This does not change queuing behavior (`handleQueueWorkerUpdates` already matche
 compatibility, not `NeedsUpdate`), so it never blocked the canaries — only the dashboard label
 was wrong, and that's now fixed.
 
+## Action1-Assisted Bootstrap Status (this round)
+
+Separately from the Codex-review gate below, this round investigated using Action1 (the
+fleet's RMM tool) as an emergency/bootstrap channel for workers still running an
+update-incapable ForgeGrid build (pre-`e1297cf`, before the worker could actually download
+update artifacts from the coordinator instead of resolving a local path). Real, verified
+findings — nothing here was guessed:
+
+- Action1 API base confirmed working: `https://app.au.action1.com/api/3.0`, org
+  `d11f37bc-ada3-4680-82eb-fc96c295ec49`. Read-only fleet discovery works via
+  `GET /endpoints/managed/{orgId}` and `GET /endpoints/status/{orgId}` (an initial guess at
+  `/endpoints?organization_id=...` was wrong and returned a generic 403 — do not reuse it).
+  11 managed endpoints exist; Laptop #03 = endpoint id
+  `e4d39c43-b311-4e45-9a8c-50d8e0b47caf` (Toshiba L850D, DESKTOP-1M0IVQE), Connected, x64.
+  Laptop #07 is currently Disconnected. Laptop #10 is x86, not amd64.
+- `GET /automations/action-templates` confirms a `run_powershell` action exists, but this
+  org's automation history is entirely the built-in hourly "Deploy Updates: All" policy —
+  there is no prior ad hoc script-run in this tenant to copy a request payload from, and
+  Action1's interactive API docs (`app.action1.com/apidocs/`) are a client-rendered Swagger
+  UI that couldn't be scraped for the exact `POST /automations/instances/{orgId}` schema.
+- **Stopped here on purpose.** Per explicit instruction not to guess a write/execute payload
+  for code that would run as Local System on real physical hardware, no PowerShell has been
+  run on any endpoint yet, and no service/executable on any machine has been touched via
+  Action1 this round.
+- **Next action, if resumed:** get the real request schema for
+  `POST /automations/instances/{orgId}` with a `run_powershell` action (from the user, or a
+  verified fetch), then run a **read-only** diagnostic on Laptop #03 only (service name,
+  executable path, SHA-256, arch) before any stop/replace/restart sequence.
+
 ## Remaining Work, In Order
 
 1. **Codex review of `8ebf341`/`69a74f6`.** Unchanged from before — still the gate. Verdict
    must be one of `APPROVED FOR LAPTOP03 CANARY`, `CHANGES REQUIRED`, or `BLOCKED`.
-   **Nothing about Laptop03/Laptop02 happens until this comes back approved.**
+   **Nothing about Laptop03/Laptop02 happens until this comes back approved.** (Not
+   re-verified this round — confirm current status before relying on it; several commits,
+   including `e1297cf`, have landed since this line was last written.)
 
 2. **Laptop03 canary self-update**, `0640a220d246` → the approved build, through ForgeGrid's
    own update mechanism only. Full lifecycle evidence required (see prior version of this
