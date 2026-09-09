@@ -295,6 +295,7 @@ chmod 600 ~/.config/forgegrid/coordinator/github-token.txt</textarea>
             <button class="ghost-button" onclick="setJobFilter('failed')">Failed</button>
             <button class="ghost-button" onclick="setJobFilter('completed')">Completed</button>
         </div>
+        <div id="jobsPagingNote" class="muted" style="margin-bottom: 8px; font-size: 12px;"></div>
         <div class="table-wrap"><table>
             <thead>
                 <tr>
@@ -364,6 +365,8 @@ chmod 600 ~/.config/forgegrid/coordinator/github-token.txt</textarea>
         let selectedWorkerId = "";
         let selectedQuickJob = "smoke";
         let jobFilter = "all";
+        let jobsShowAll = false;
+        const JOBS_PAGE_SIZE = 20;
         let projectsStore = [];
         let updatesStore = null;
         let selectedProject = null;
@@ -468,6 +471,12 @@ chmod 600 ~/.config/forgegrid/coordinator/github-token.txt</textarea>
 
         function setJobFilter(filter) {
             jobFilter = filter;
+            jobsShowAll = false;
+            renderJobs();
+        }
+
+        function toggleJobsShowAll() {
+            jobsShowAll = !jobsShowAll;
             renderJobs();
         }
 
@@ -1463,7 +1472,20 @@ Then run:
                         retryChildren[j.retry_of] = (retryChildren[j.retry_of] || 0) + 1;
                     }
                 });
-                jobsStore.filter(jobMatchesFilter).forEach(j => {
+                const matching = jobsStore.filter(jobMatchesFilter).sort((a, b) => new Date(b.start_time || 0) - new Date(a.start_time || 0));
+                const visible = jobsShowAll ? matching : matching.slice(0, JOBS_PAGE_SIZE);
+                const pagingNote = document.getElementById('jobsPagingNote');
+                if (pagingNote) {
+                    if (matching.length > JOBS_PAGE_SIZE) {
+                        const hidden = matching.length - visible.length;
+                        pagingNote.innerHTML = hidden > 0
+                            ? `Showing ${visible.length} of ${matching.length} jobs. <button class="ghost-button" onclick="toggleJobsShowAll()">Show all</button>`
+                            : `Showing all ${matching.length} jobs. <button class="ghost-button" onclick="toggleJobsShowAll()">Show fewer</button>`;
+                    } else {
+                        pagingNote.innerHTML = '';
+                    }
+                }
+                visible.forEach(j => {
                     const machineName = jobMachineName(j);
                     const machineDetail = jobMachineDetail(j);
                     let dateStr = '-';
