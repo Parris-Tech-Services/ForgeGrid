@@ -280,9 +280,55 @@ findings — nothing here was guessed:
   as the first bootstrap (Action1 + short-lived local file server, torn down after) — this
   step itself doesn't depend on the buggy download path, so it wasn't blocked by the bug it
   was delivering the fix for. Confirmed via `forgegrid.exe version` and a stable
-  running process. **Next step, not yet done**: queue a genuinely newer build (this doc
-  update itself will be that commit) for Laptop03 and prove the *fixed* worker binary
-  completes the full authenticated-download canary end to end.
+  running process.
+
+- **UPDATE 2026-09-09, later still: the timeout fix was real and worth keeping, but it was
+  NOT the actual root cause — the native canary still fails, and the evidence now points to
+  a real network-layer issue specific to Laptop03, not a ForgeGrid bug.**
+
+  Queued a genuinely newer build (commit `5e5394f58376`) for Laptop03 running the *fixed*
+  worker binary (confirmed via `current_commit: 26d0ec846d4f` in the queue response, so
+  this really did exercise the fix). **Identical failure**: staged artifact still hashed to
+  the empty-file SHA-256. The 5-minute `DownloadClient` timeout is still a correct, worthwhile
+  fix (a shared 10s timeout for both polling and multi-MB downloads was always a latent
+  bug) — it's being kept — but it evidently isn't what's causing this specific failure.
+
+  Re-opened the investigation with two more tests targeting the one remaining untested
+  variable: the real Windows/Laptop03 environment itself, independent of the Go worker
+  binary's code:
+  - Registered a second throwaway test worker and ran a plain PowerShell
+    `Invoke-WebRequest` **from Laptop03 itself** against the exact same artifact endpoint,
+    with valid credentials and TLS 1.2 explicitly forced. Result: `The underlying
+    connection was closed: An unexpected error occurred on a send.`
+  - The *same* PowerShell failure occurred for a **tiny** unrelated POST
+    (`/api/pairing/code`, no body) — ruling out "large response" as PowerShell's specific
+    problem; on Laptop03, PowerShell/.NET Framework 5.1 (`SecurityProtocol: SystemDefault`)
+    cannot complete an HTTPS handshake against the coordinator's self-signed cert at all,
+    for requests of any size. This is a separate, real finding, but not the explanation for
+    the Go worker's failure — the Go worker's own poll/report calls to the same coordinator
+    clearly succeed throughout this session (that's how its "failed" reports were even
+    received).
+  - A `Test-Connection` (ICMP ping) to the coordinator from Laptop03 failed outright with
+    `Error due to lack of resources` — a genuine, unusual local error, not a timeout or
+    packet loss reading. Consistent with Laptop03 being a real resource/environment-
+    constrained machine (per the earlier hardware census: 4c/4t, 8.0GB, MEDIUM tier,
+    among the oldest hardware in the fleet), though not yet conclusively diagnosed further.
+
+  **Current assessment**: the coordinator's artifact-serving code has been proven correct
+  three independent, rigorous ways (in-process `httptest.NewRecorder()`, a real
+  `httptest.Server`, and curling the actual live coordinator with a freshly-registered real
+  worker token — all three got the exact right bytes and SHA-256). The remaining failure is
+  specific to Laptop03's real network/local environment reaching the coordinator for this
+  particular transfer, not a bug in ForgeGrid's request/response handling. This is not yet
+  root-caused to a specific fixable cause (WiFi signal quality, driver, local firewall/AV,
+  or genuine resource exhaustion on this older machine are all still plausible) and may
+  benefit from hands-on investigation of Laptop03 itself (e.g., trying an Ethernet
+  connection instead of WiFi) rather than further remote diagnosis.
+
+  Two harmless throwaway test workers were registered during this investigation
+  (`ClaudeDebugTestWorker`, `ClaudeDebugTestWorker2`) — no delete-worker admin endpoint
+  exists yet, so they remain in the fleet list as obviously-named, permanently-offline
+  entries until manually cleaned up (or such an endpoint is added).
 
 ## Remaining Work, In Order
 
