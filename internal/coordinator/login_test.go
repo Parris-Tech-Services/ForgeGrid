@@ -3,6 +3,7 @@ package coordinator
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -39,6 +40,16 @@ func TestWriteDashboardLoginFile(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("login file missing %q:\n%s", want, text)
 		}
+	}
+
+	if runtime.GOOS == "windows" {
+		// Windows/NTFS has no equivalent of POSIX owner-only permission
+		// bits, so os.Stat().Mode().Perm() cannot reflect the 0600 the file
+		// was written with (Go's Windows port only tracks the read-only DOS
+		// attribute); the coordinator this file belongs to is only ever
+		// deployed on Linux in this project, so that's where this must
+		// actually hold.
+		return
 	}
 
 	info, err := os.Stat(path)

@@ -3,6 +3,7 @@ package coordinator
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"forgegrid/internal/store"
@@ -22,6 +23,9 @@ func TestNextLinkMissing(t *testing.T) {
 }
 
 func TestGitHubTokenFileRequiresOwnerOnlyPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("owner-only file permission enforcement is POSIX-only: Windows/NTFS has no equivalent of POSIX group/other permission bits, so os.Chmod cannot make a file 'secure' or 'loose' in the sense this test checks, and the coordinator (which is what reads this file) is only ever deployed on Linux in this project")
+	}
 	t.Setenv("GITHUB_TOKEN", "")
 	s, err := store.NewStore(filepath.Join(t.TempDir(), "store"))
 	if err != nil {
