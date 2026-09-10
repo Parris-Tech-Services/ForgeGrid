@@ -640,7 +640,9 @@ func (w *Worker) verifyUpdateTransaction() {
 			log.Printf("[Update] Rollback failed health verification: could not reconnect to coordinator")
 			w.reportUpdate(tx.ID, "rollback_failed", "Rollback failed: could not reconnect to coordinator", true)
 			tx.CurrentState = "ROLLBACK_FAILED"
-			writeTx(tx)
+			if err := writeTx(tx); err != nil {
+				log.Printf("[Update] Could not persist ROLLBACK_FAILED state: %v", err)
+			}
 			return
 		}
 
@@ -650,14 +652,18 @@ func (w *Worker) verifyUpdateTransaction() {
 			log.Printf("[Update] Rollback failed health verification: running hash did not match old hash")
 			w.reportUpdate(tx.ID, "rollback_failed", "Rollback failed: running hash did not match old hash", true)
 			tx.CurrentState = "ROLLBACK_FAILED"
-			writeTx(tx)
+			if err := writeTx(tx); err != nil {
+				log.Printf("[Update] Could not persist ROLLBACK_FAILED state: %v", err)
+			}
 			return
 		}
 
 		w.reportUpdate(tx.ID, "rolled_back", "New worker did not reconnect within time limit. Previous version restored successfully. Reason: "+tx.RollbackReason, true)
 		log.Printf("[Update] Previous worker restored")
 		tx.CurrentState = "ROLLED_BACK"
-		writeTx(tx)
+		if err := writeTx(tx); err != nil {
+			log.Printf("[Update] Could not persist ROLLED_BACK state: %v", err)
+		}
 		return
 	}
 
@@ -696,7 +702,9 @@ func (w *Worker) verifyUpdateTransaction() {
 	w.reportUpdate(tx.ID, "completed", "Worker successfully updated and verified.", true)
 
 	tx.CurrentState = "COMPLETED"
-	writeTx(tx)
+	if err := writeTx(tx); err != nil {
+		log.Printf("[Update] Could not persist COMPLETED state: %v", err)
+	}
 	log.Printf("[Update] Transaction completed")
 }
 

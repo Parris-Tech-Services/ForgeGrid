@@ -1,8 +1,10 @@
 package worker
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -151,5 +153,74 @@ func TestVerifyUpdateTransactionRecoversAfterVerificationFailureAcrossRestart(t 
 	b, err := os.ReadFile(primary)
 	if err != nil || string(b) != "known-good-old-binary" {
 		t.Fatalf("expected the known-good backup to be restored to primary, got content=%q err=%v", b, err)
+	}
+}
+
+// TestVerifyUpdateTransactionLogsRolledBackPersistFailureInsteadOfSilentlyIgnoringIt
+// covers a gap Copilot's MEDIUM finding flagged: several writeTx() calls in
+// verifyUpdateTransaction's finalize steps (ROLLBACK_FAILED / ROLLED_BACK /
+// COMPLETED) discarded the returned error entirely. If that final disk write
+// failed - e.g. a full disk or a permissions problem - the in-memory
+// decision (already reported to the coordinator via reportUpdate) and the
+// on-disk transaction file would silently disagree, so a fresh process
+// restarting later would re-read the last state that *did* persist
+// (ROLLING_BACK) and could re-attempt recovery against an update the
+// coordinator already believes is finished.
+//
+// This does not change what verifyUpdateTransaction decides or reports; it
+// only proves the failure is now logged rather than swallowed, and that the
+// last successfully-persisted transaction state on disk survives untouched
+// (rather than a half-written or corrupted file) when the final write fails.
+//
+// The scenario below drives the ROLLING_BACK -> ROLLBACK_FAILED branch
+// specifically (the heartbeat POST has nowhere real to go in this test, so
+// the coordinator-reconnect check fails and takes that exit) rather than
+// ROLLED_BACK, but all three finalize sites share the exact same
+// previously-unchecked writeTx(tx) pattern, so this exercises that pattern
+// directly.
+func TestVerifyUpdateTransactionLogsRolledBackPersistFailureInsteadOfSilentlyIgnoringIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX read-only directory to force writeTx's create-new-file step to fail; Windows ACL semantics for a directory don't map onto os.Chmod the same way")
+	}
+
+	tmp := t.TempDir()
+	setSandboxedDataDir(t, tmp)
+	dataDir := getWorkerDataDir()
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatalf("failed to create data dir: %v", err)
+	}
+
+	tx := &UpdateTransaction{
+		ID:           "tx-rolledback-persist-failure",
+		WorkerID:     "worker-1",
+		CurrentState: "ROLLING_BACK",
+	}
+	if err := writeTx(tx); err != nil {
+		t.Fatalf("setup: failed to persist initial ROLLING_BACK state: %v", err)
+	}
+
+	// Remove write permission on the data dir itself (not the files already
+	// in it) so writeTx's os.WriteFile of a brand new ".tmp" file fails,
+	// while the tx and status files already inside remain fully readable.
+	if err := os.Chmod(dataDir, 0500); err != nil {
+		t.Fatalf("setup: failed to make data dir read-only: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(dataDir, 0755) })
+
+	w := &Worker{Client: &http.Client{Timeout: 1 * time.Second}}
+
+	// Must not panic even though the finalize write below will fail.
+	w.verifyUpdateTransaction()
+
+	if err := os.Chmod(dataDir, 0755); err != nil {
+		t.Fatalf("cleanup: failed to restore data dir permissions: %v", err)
+	}
+
+	onDisk, err := readTx()
+	if err != nil {
+		t.Fatalf("expected the last successfully-persisted tx file to still be readable, got error: %v", err)
+	}
+	if onDisk.CurrentState != "ROLLING_BACK" {
+		t.Fatalf("writeTx failing on the ROLLED_BACK finalize write should leave the last successfully-persisted state (ROLLING_BACK) on disk untouched, got %q", onDisk.CurrentState)
 	}
 }
