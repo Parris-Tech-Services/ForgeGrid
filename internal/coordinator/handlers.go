@@ -394,7 +394,6 @@ func (c *Coordinator) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		UptimeSeconds  uint64           `json:"uptime_seconds"`
 		ActiveJobCount int              `json:"active_job_count"`
 		WorkerHealth   string           `json:"worker_health"`
-		Labels         []string         `json:"labels"`
 		Capabilities   []string         `json:"capabilities"`
 		Version        version.InfoData `json:"version"`
 	}
@@ -421,9 +420,14 @@ func (c *Coordinator) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	worker.UptimeSeconds = req.UptimeSeconds
 	worker.ActiveJobCount = req.ActiveJobCount
 	worker.WorkerHealth = req.WorkerHealth
-	if req.Labels != nil {
-		worker.Labels = append([]string{}, req.Labels...)
-	}
+	// Labels are deliberately NOT taken from the heartbeat payload, unlike
+	// Capabilities. Capabilities are legitimate worker-self-reported tool
+	// detection; Labels are admin-assigned slot/policy tags (see
+	// handleWorkerPolicy) that a worker has no business overwriting on its
+	// own heartbeat. Before this fix, any worker sending a non-nil "labels"
+	// field (even an empty array, which most workers do since they don't
+	// manage this themselves) silently wiped out labels set moments earlier
+	// via /api/workers/policy -- confirmed live against a real worker.
 	if req.Capabilities != nil {
 		worker.Capabilities = append([]string{}, req.Capabilities...)
 	}
