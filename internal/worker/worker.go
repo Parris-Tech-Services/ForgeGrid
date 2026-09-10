@@ -640,9 +640,7 @@ func (w *Worker) verifyUpdateTransaction() {
 			log.Printf("[Update] Rollback failed health verification: could not reconnect to coordinator")
 			w.reportUpdate(tx.ID, "rollback_failed", "Rollback failed: could not reconnect to coordinator", true)
 			tx.CurrentState = "ROLLBACK_FAILED"
-			if err := writeTx(tx); err != nil {
-				log.Printf("[Update] Could not persist ROLLBACK_FAILED state: %v", err)
-			}
+			logWriteTxErr(tx, "ROLLBACK_FAILED: could not reconnect to coordinator")
 			return
 		}
 
@@ -652,18 +650,14 @@ func (w *Worker) verifyUpdateTransaction() {
 			log.Printf("[Update] Rollback failed health verification: running hash did not match old hash")
 			w.reportUpdate(tx.ID, "rollback_failed", "Rollback failed: running hash did not match old hash", true)
 			tx.CurrentState = "ROLLBACK_FAILED"
-			if err := writeTx(tx); err != nil {
-				log.Printf("[Update] Could not persist ROLLBACK_FAILED state: %v", err)
-			}
+			logWriteTxErr(tx, "ROLLBACK_FAILED: running hash did not match old hash")
 			return
 		}
 
 		w.reportUpdate(tx.ID, "rolled_back", "New worker did not reconnect within time limit. Previous version restored successfully. Reason: "+tx.RollbackReason, true)
 		log.Printf("[Update] Previous worker restored")
 		tx.CurrentState = "ROLLED_BACK"
-		if err := writeTx(tx); err != nil {
-			log.Printf("[Update] Could not persist ROLLED_BACK state: %v", err)
-		}
+		logWriteTxErr(tx, "ROLLED_BACK")
 		return
 	}
 
@@ -702,9 +696,7 @@ func (w *Worker) verifyUpdateTransaction() {
 	w.reportUpdate(tx.ID, "completed", "Worker successfully updated and verified.", true)
 
 	tx.CurrentState = "COMPLETED"
-	if err := writeTx(tx); err != nil {
-		log.Printf("[Update] Could not persist COMPLETED state: %v", err)
-	}
+	logWriteTxErr(tx, "COMPLETED")
 	log.Printf("[Update] Transaction completed")
 }
 
@@ -731,9 +723,7 @@ var osExit = os.Exit
 func (w *Worker) failCandidateVerification(tx *UpdateTransaction, reason string) {
 	tx.RollbackReason = "Candidate failed health verification: " + reason
 	tx.CurrentState = "ROLLING_BACK"
-	if err := writeTx(tx); err != nil {
-		log.Printf("[Update] Could not persist ROLLING_BACK state: %v", err)
-	}
+	logWriteTxErr(tx, "ROLLING_BACK")
 	if tx.UpdaterHelperPath == "" {
 		log.Printf("[Update] No updater helper path recorded for this transaction; cannot relaunch to roll back")
 	} else if err := launchUpdaterHelper(tx.UpdaterHelperPath); err != nil {

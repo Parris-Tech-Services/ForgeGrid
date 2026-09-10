@@ -118,7 +118,17 @@ git commit -m "Initial commit"
 	worker.SetGitPolicy(remoteRepo, true)
 	worker.capabilityAllow = []string{"agent:fake", "git"}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// jobLoop only polls every 2s, and the pipeline this test drives runs
+	// several separate git subprocesses (clone, branch, commit) plus the
+	// fake agent stage before it can report COMPLETED. 15s was tight
+	// enough that it passed reliably on Linux/race-detector CI but timed
+	// out on windows-latest, where per-process spawn overhead (Windows
+	// Defender real-time scanning each new process is a known contributor)
+	// is routinely a few times higher for the same git-heavy workload.
+	// This still fails fast if the pipeline is genuinely stuck; it just
+	// stops being tighter than the job's own declared timeout_seconds: 60
+	// above.
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
 	worker.Start()

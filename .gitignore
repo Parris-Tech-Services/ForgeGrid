@@ -31,6 +31,12 @@ Thumbs.db
 .vscode/
 .idea/
 forgegrid
+# git is case-sensitive even on a case-insensitive filesystem: the pattern
+# above never matched the repo-root build output of `go build`, which is
+# capitalized to match the module/binary name (ForgeGrid / ForgeGrid.exe on
+# Windows), so those kept slipping past this ignore and getting committed.
+/ForgeGrid
+/ForgeGrid.exe
 .agents/scripts/bootstrap-crypto/bootstrap-crypto.exe
 encrypted-bundle.bin
 

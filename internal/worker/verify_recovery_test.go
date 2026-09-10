@@ -182,6 +182,9 @@ func TestVerifyUpdateTransactionLogsRolledBackPersistFailureInsteadOfSilentlyIgn
 	if runtime.GOOS == "windows" {
 		t.Skip("uses a POSIX read-only directory to force writeTx's create-new-file step to fail; Windows ACL semantics for a directory don't map onto os.Chmod the same way")
 	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses POSIX permission bits entirely, so os.Chmod(dataDir, 0500) would not actually block the write this test depends on failing")
+	}
 
 	tmp := t.TempDir()
 	setSandboxedDataDir(t, tmp)
