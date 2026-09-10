@@ -305,19 +305,24 @@ func generateRandomID() string {
 }
 
 var stealWaitDuration = 10 * time.Second
+var verifyWaitDuration = 30 * time.Second
+var verifyPollInterval = 2 * time.Second
 
 func rollback(tx *UpdateTransaction) {
-	if current, err := readTx(); err == nil && current.ID == tx.ID {
-		switch current.CurrentState {
-		case "ROLLED_BACK", "ROLLBACK_FAILED", "COMPLETED":
-			log.Printf("[Update] Rollback already resolved (state=%s); skipping duplicate rollback", current.CurrentState)
-			return
-		}
+	localTx, err := readTx()
+	if err != nil || localTx.ID != tx.ID {
+		localTx = tx
+	}
+
+	switch localTx.CurrentState {
+	case "ROLLED_BACK", "ROLLBACK_FAILED", "COMPLETED":
+		log.Printf("[Update] Rollback already resolved (state=%s); skipping duplicate rollback", localTx.CurrentState)
+		return
 	}
 
 	myID := generateRandomID()
-	t1Base := tx.BackupBinaryPath
-	t2Base := filepath.Join(getWorkerDataDir(), "rollback_restart_"+tx.ID)
+	t1Base := localTx.BackupBinaryPath
+	t2Base := filepath.Join(getWorkerDataDir(), "rollback_restart_"+localTx.ID)
 
 	phase1Done := false
 
@@ -355,20 +360,19 @@ func rollback(tx *UpdateTransaction) {
 			// Prepare Phase 2 token BEFORE consuming Phase 1 token
 			os.WriteFile(t2Base+".pending", []byte{}, 0644)
 
-			log.Printf("[Update] Rolling back: %s", tx.RollbackReason)
-			tx.CurrentState = "ROLLING_BACK"
-			logWriteTxErr(tx, "ROLLING_BACK")
+			log.Printf("[Update] Rolling back: %s", localTx.RollbackReason)
+			localTx.CurrentState = "ROLLING_BACK"
+			logWriteTxErr(localTx, "ROLLING_BACK")
 
 			// Consume Phase 1 token
-			if err := safeReplace(myClaim, tx.OldBinaryPath); err != nil {
+			if err := safeReplace(myClaim, localTx.OldBinaryPath); err != nil {
 				if os.IsNotExist(err) {
 					log.Printf("[Update] Fenced out of Phase 1! Retrying discovery.")
 					continue
 				}
-				tx.CurrentState = "ROLLBACK_FAILED"
-				tx.RollbackReason = tx.RollbackReason + " | restore from backup failed: " + err.Error()
-				logWriteTxErr(tx, "ROLLBACK_FAILED (restore)")
-				log.Printf("[Update] Rollback FAILED to restore the previous binary: %v", err)
+				localTx.CurrentState = "ROLLBACK_FAILED"
+				localTx.RollbackReason = localTx.RollbackReason + " | restore from backup failed: " + err.Error()
+				logWriteTxErr(localTx, "ROLLBACK_FAILED (restore)")
 				return
 			}
 			phase1Done = true
@@ -380,13 +384,47 @@ func rollback(tx *UpdateTransaction) {
 		return
 	}
 
-	// PHASE 2: WORKER RESTART
-	iDidPhase2 := false
-	phase2AlreadyDone := false
+	// PHASE 2 & 3: WORKER RESTART INTENT & VERIFICATION
+	t2Base = filepath.Join(getWorkerDataDir(), "rollback_restart_"+localTx.ID)
 	for {
+		hasConsumed := false
 		if _, err := os.Stat(t2Base + ".consumed"); err == nil {
-			phase2AlreadyDone = true
-			break
+			hasConsumed = true
+		}
+
+		if hasConsumed {
+			// Phase 2 Authorized. Move to Phase 3 Verification.
+			log.Printf("[Update] Restart authorized. Verifying previous worker health...")
+			deadline := time.Now().Add(verifyWaitDuration)
+			verified := false
+			for time.Now().Before(deadline) {
+				latest, err := readTx()
+				if err == nil && latest.ID == localTx.ID {
+					if latest.CurrentState == "ROLLED_BACK" || latest.CurrentState == "ROLLBACK_FAILED" || latest.CurrentState == "COMPLETED" {
+						verified = true
+						break
+					}
+				}
+				time.Sleep(verifyPollInterval)
+			}
+
+			if verified {
+				log.Printf("[Update] Rollback restart verified.")
+				return
+			}
+
+			// Timeout expired and state is still unresolved.
+			// The previous actor likely crashed before or during Start().
+			// Idempotently retry Start().
+			log.Printf("[Update] Verification timed out. Retrying restart of previous worker...")
+			if err := GetLifecycle(localTx.LifecycleMode).Start(localTx); err != nil {
+				localTx.CurrentState = "ROLLBACK_FAILED"
+				localTx.RollbackReason = localTx.RollbackReason + " | restart retry failed: " + err.Error()
+				logWriteTxErr(localTx, "ROLLBACK_FAILED (restart)")
+				return
+			}
+			// Loop continues, we will wait another 30 seconds for verification.
+			continue
 		}
 
 		hasPending := false
@@ -397,9 +435,9 @@ func rollback(tx *UpdateTransaction) {
 		existingClaims, _ := filepath.Glob(t2Base + ".claim.*")
 
 		if !hasPending && len(existingClaims) == 0 {
-			tx.CurrentState = "ROLLBACK_FAILED"
-			tx.RollbackReason = tx.RollbackReason + " | restore from backup failed: backup binary missing"
-			logWriteTxErr(tx, "ROLLBACK_FAILED (missing backup)")
+			localTx.CurrentState = "ROLLBACK_FAILED"
+			localTx.RollbackReason = localTx.RollbackReason + " | restore from backup failed: backup binary missing"
+			logWriteTxErr(localTx, "ROLLBACK_FAILED (missing backup)")
 			return
 		}
 
@@ -426,31 +464,23 @@ func rollback(tx *UpdateTransaction) {
 					log.Printf("[Update] Fenced out of Phase 2! Retrying discovery.")
 					continue
 				}
-				tx.CurrentState = "ROLLBACK_FAILED"
-				tx.RollbackReason = tx.RollbackReason + " | could not consume restart token: " + err.Error()
-				logWriteTxErr(tx, "ROLLBACK_FAILED (token error)")
+				localTx.CurrentState = "ROLLBACK_FAILED"
+				localTx.RollbackReason = localTx.RollbackReason + " | could not consume restart token: " + err.Error()
+				logWriteTxErr(localTx, "ROLLBACK_FAILED (token error)")
 				return
 			}
 
-			// Authorized to restart exactly once
+			// Token consumed. Start the worker for the first time.
 			log.Printf("[Update] Restarting previous worker...")
-			if err := GetLifecycle(tx.LifecycleMode).Start(tx); err != nil {
-				tx.CurrentState = "ROLLBACK_FAILED"
-				tx.RollbackReason = tx.RollbackReason + " | restart of restored binary failed: " + err.Error()
-				logWriteTxErr(tx, "ROLLBACK_FAILED (restart)")
+			if err := GetLifecycle(localTx.LifecycleMode).Start(localTx); err != nil {
+				localTx.CurrentState = "ROLLBACK_FAILED"
+				localTx.RollbackReason = localTx.RollbackReason + " | restart of restored binary failed: " + err.Error()
+				logWriteTxErr(localTx, "ROLLBACK_FAILED (restart)")
 				log.Printf("[Update] Rollback FAILED to restart the previous worker: %v", err)
 				return
 			}
-			iDidPhase2 = true
-			break
-		}
-	}
-
-	if iDidPhase2 || phase2AlreadyDone {
-		if tx.CurrentState != "ROLLED_BACK" {
-			tx.CurrentState = "ROLLED_BACK"
-			logWriteTxErr(tx, "ROLLED_BACK")
-			log.Printf("[Update] Rollback initiated. Waiting for previous worker to verify...")
+			// Loop continues, which will discover `.consumed` and enter Phase 3 verification.
+			continue
 		}
 	}
 }

@@ -34,6 +34,14 @@ func TestRollbackCrashPhase1(t *testing.T) {
 	stealWaitDuration = 10 * time.Millisecond
 	t.Cleanup(func() { stealWaitDuration = originalStealWait })
 
+	originalVerifyPoll := verifyPollInterval
+	verifyPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { verifyPollInterval = originalVerifyPoll })
+
+	originalVerifyWait := verifyWaitDuration
+	verifyWaitDuration = 30 * time.Millisecond
+	t.Cleanup(func() { verifyWaitDuration = originalVerifyWait })
+
 	var mu sync.Mutex
 	var startCount, replaceCount int
 
@@ -45,6 +53,8 @@ func TestRollbackCrashPhase1(t *testing.T) {
 				mu.Lock()
 				startCount++
 				mu.Unlock()
+				tx.CurrentState = "ROLLED_BACK"
+				writeTx(tx)
 				return nil
 			},
 		}
@@ -109,6 +119,14 @@ func TestRollbackCrashPhase2(t *testing.T) {
 	stealWaitDuration = 10 * time.Millisecond
 	t.Cleanup(func() { stealWaitDuration = originalStealWait })
 
+	originalVerifyPoll := verifyPollInterval
+	verifyPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { verifyPollInterval = originalVerifyPoll })
+
+	originalVerifyWait := verifyWaitDuration
+	verifyWaitDuration = 30 * time.Millisecond
+	t.Cleanup(func() { verifyWaitDuration = originalVerifyWait })
+
 	var mu sync.Mutex
 	var startCount, replaceCount int
 
@@ -120,6 +138,8 @@ func TestRollbackCrashPhase2(t *testing.T) {
 				mu.Lock()
 				startCount++
 				mu.Unlock()
+				tx.CurrentState = "ROLLED_BACK"
+				writeTx(tx)
 				return nil
 			},
 		}
@@ -187,6 +207,14 @@ func TestRollbackCrashPhase3(t *testing.T) {
 	stealWaitDuration = 10 * time.Millisecond
 	t.Cleanup(func() { stealWaitDuration = originalStealWait })
 
+	originalVerifyPoll := verifyPollInterval
+	verifyPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { verifyPollInterval = originalVerifyPoll })
+
+	originalVerifyWait := verifyWaitDuration
+	verifyWaitDuration = 30 * time.Millisecond
+	t.Cleanup(func() { verifyWaitDuration = originalVerifyWait })
+
 	var mu sync.Mutex
 	var startCount, replaceCount int
 
@@ -198,6 +226,8 @@ func TestRollbackCrashPhase3(t *testing.T) {
 				mu.Lock()
 				startCount++
 				mu.Unlock()
+				tx.CurrentState = "ROLLED_BACK"
+				writeTx(tx)
 				return nil
 			},
 		}
@@ -213,7 +243,7 @@ func TestRollbackCrashPhase3(t *testing.T) {
 	}
 	t.Cleanup(func() { safeReplace = originalReplace })
 
-	// SIMULATE CRASH IN PHASE 3 (After Start, before state update)
+	// SIMULATE CRASH IN PHASE 3 (After token consumed, before Start() and state update)
 	// Backup is completely gone. Phase 2 consumed exists.
 	t2Base := filepath.Join(getWorkerDataDir(), "rollback_restart_"+tx.ID)
 	os.WriteFile(t2Base+".consumed", []byte{}, 0644)
@@ -233,7 +263,7 @@ func TestRollbackCrashPhase3(t *testing.T) {
 	if rc != 0 {
 		t.Fatalf("safeReplace was executed %d times, expected exactly 0", rc)
 	}
-	if sc != 0 {
-		t.Fatalf("Start() was executed %d times, expected exactly 0 since Phase 2 was skipped", sc)
+	if sc != 1 {
+		t.Fatalf("Start() was executed %d times, expected exactly 1 since Phase 3 was resumed", sc)
 	}
 }

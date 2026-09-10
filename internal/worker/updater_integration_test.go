@@ -151,6 +151,10 @@ func TestRollbackConcurrencyRace(t *testing.T) {
 				mu.Unlock()
 				// Simulate slow restart
 				time.Sleep(200 * time.Millisecond)
+				
+				// Simulate the worker verifying its own health
+				tx.CurrentState = "ROLLED_BACK"
+				writeTx(tx)
 				return nil
 			},
 		}
@@ -159,14 +163,29 @@ func TestRollbackConcurrencyRace(t *testing.T) {
 
 	originalReplace := safeReplace
 	safeReplace = func(newPath, destPath string) error {
-		mu.Lock()
-		replaceCount++
-		mu.Unlock()
 		// Simulate slow file operations
 		time.Sleep(200 * time.Millisecond)
-		return originalReplace(newPath, destPath)
+		err := originalReplace(newPath, destPath)
+		if err == nil {
+			mu.Lock()
+			replaceCount++
+			mu.Unlock()
+		}
+		return err
 	}
 	t.Cleanup(func() { safeReplace = originalReplace })
+
+	originalStealWait := stealWaitDuration
+	stealWaitDuration = 10 * time.Millisecond
+	t.Cleanup(func() { stealWaitDuration = originalStealWait })
+
+	originalVerifyPoll := verifyPollInterval
+	verifyPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { verifyPollInterval = originalVerifyPoll })
+
+	originalVerifyWait := verifyWaitDuration
+	verifyWaitDuration = 30 * time.Millisecond
+	t.Cleanup(func() { verifyWaitDuration = originalVerifyWait })
 
 	var wg sync.WaitGroup
 	wg.Add(2)
