@@ -3,6 +3,7 @@ package worker
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -113,5 +114,56 @@ func TestUpdaterIntegrationRollback(t *testing.T) {
 	b, _ := os.ReadFile(primaryPath)
 	if string(b) != "backup" {
 		t.Fatalf("Primary was not restored: %s", string(b))
+	}
+}
+
+func TestRollbackConcurrencyRace(t *testing.T) {
+	tmp := t.TempDir()
+	setSandboxedDataDir(t, tmp)
+	useFakeLifecycle(t, nil)
+
+	updateDir := filepath.Join(getWorkerDataDir(), "updates")
+	os.MkdirAll(updateDir, 0755)
+
+	primaryPath := filepath.Join(tmp, "ForgeGrid.exe")
+	backupPath := filepath.Join(tmp, "previous-ForgeGrid.exe")
+	os.WriteFile(primaryPath, []byte("old"), 0755)
+	os.WriteFile(backupPath, []byte("backup"), 0755)
+
+	tx := &UpdateTransaction{
+		ID:               "tx-race",
+		CurrentState:     "VERIFYING_NEW_WORKER",
+		OldBinaryPath:    primaryPath,
+		BackupBinaryPath: backupPath,
+		LifecycleMode:    "portable",
+	}
+	writeTx(tx)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		rollback(tx)
+	}()
+
+	go func() {
+		defer wg.Done()
+		rollback(tx)
+	}()
+
+	wg.Wait()
+
+	current, err := readTx()
+	if err != nil {
+		t.Fatalf("Failed to read tx: %v", err)
+	}
+	if current.CurrentState != "ROLLED_BACK" {
+		t.Fatalf("Expected state to be ROLLED_BACK, got %s", current.CurrentState)
+	}
+
+	b, _ := os.ReadFile(primaryPath)
+	if string(b) != "backup" {
+		t.Fatalf("Primary was not restored properly, got %s", string(b))
 	}
 }

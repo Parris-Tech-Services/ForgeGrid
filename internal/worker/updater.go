@@ -303,11 +303,7 @@ func rollback(tx *UpdateTransaction) {
 	// invoked twice for the same transaction from two different processes
 	// (the original updater helper's waitForHealth() deadline, and the
 	// candidate worker's own failCandidateVerification() relaunching a
-	// fresh helper). If a prior call already finished, safeReplace()ing a
-	// second time would try to move BackupBinaryPath again after it has
-	// already been consumed, fail, and overwrite an honest ROLLED_BACK
-	// with a misleading ROLLBACK_FAILED even though the binary itself is
-	// fine - so bail out early once the transaction is already resolved.
+	// fresh helper). If a prior call already finished, bail out early.
 	if current, err := readTx(); err == nil && current.ID == tx.ID {
 		switch current.CurrentState {
 		case "ROLLED_BACK", "ROLLBACK_FAILED", "COMPLETED":
@@ -316,11 +312,52 @@ func rollback(tx *UpdateTransaction) {
 		}
 	}
 
+	claimedPath := tx.BackupBinaryPath + ".rollback_claim"
+	owned := false
+
+	// Attempt atomic claim by renaming the backup file
+	if err := os.Rename(tx.BackupBinaryPath, claimedPath); err == nil {
+		owned = true
+	} else if os.IsNotExist(err) {
+		if _, statErr := os.Stat(claimedPath); statErr == nil {
+			// The claim file exists, meaning another process already claimed it.
+			log.Printf("[Update] Rollback claimed by another process. Waiting for resolution...")
+			deadline := time.Now().Add(30 * time.Second)
+			for time.Now().Before(deadline) {
+				if current, err := readTx(); err == nil && current.ID == tx.ID {
+					switch current.CurrentState {
+					case "ROLLED_BACK", "ROLLBACK_FAILED", "COMPLETED":
+						return // The other process finished
+					}
+				}
+				time.Sleep(1 * time.Second)
+			}
+			// If we timed out, assume the owner crashed and take over
+			log.Printf("[Update] Rollback owner timed out. Taking over rollback execution.")
+			owned = true
+		} else {
+			tx.CurrentState = "ROLLBACK_FAILED"
+			tx.RollbackReason = tx.RollbackReason + " | restore from backup failed: backup binary missing"
+			logWriteTxErr(tx, "ROLLBACK_FAILED (missing backup)")
+			return
+		}
+	} else {
+		tx.CurrentState = "ROLLBACK_FAILED"
+		tx.RollbackReason = tx.RollbackReason + " | could not claim rollback ownership: " + err.Error()
+		logWriteTxErr(tx, "ROLLBACK_FAILED (claim failed)")
+		return
+	}
+
+	if !owned {
+		return
+	}
+
 	log.Printf("[Update] Rolling back: %s", tx.RollbackReason)
 	tx.CurrentState = "ROLLING_BACK"
 	logWriteTxErr(tx, "ROLLING_BACK")
 
-	if err := safeReplace(tx.BackupBinaryPath, tx.OldBinaryPath); err != nil {
+	// Use the claimed path for the restore
+	if err := safeReplace(claimedPath, tx.OldBinaryPath); err != nil {
 		tx.CurrentState = "ROLLBACK_FAILED"
 		tx.RollbackReason = tx.RollbackReason + " | restore from backup failed: " + err.Error()
 		logWriteTxErr(tx, "ROLLBACK_FAILED (restore)")
