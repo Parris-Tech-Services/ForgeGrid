@@ -57,8 +57,29 @@ func TestUpdaterCleanup(t *testing.T) {
 func TestRecoveryStates(t *testing.T) {
 	tmp := t.TempDir()
 	setSandboxedDataDir(t, tmp)
-	useFakeLifecycle(t, nil)
 
+	originalVerifyPoll := verifyPollInterval
+	verifyPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { verifyPollInterval = originalVerifyPoll })
+
+	originalLifecycle := GetLifecycle
+	GetLifecycle = func(mode string) Lifecycle {
+		return &fakeLifecycle{
+			mode: mode,
+			startFn: func(tx *UpdateTransaction) error {
+				go func() {
+					time.Sleep(5 * time.Millisecond)
+					latest, err := readTx()
+					if err == nil {
+						latest.CurrentState = "ROLLED_BACK"
+						writeTx(latest)
+					}
+				}()
+				return nil
+			},
+		}
+	}
+	t.Cleanup(func() { GetLifecycle = originalLifecycle })
 	updateDir := filepath.Join(getWorkerDataDir(), "updates")
 	os.MkdirAll(updateDir, 0755)
 
