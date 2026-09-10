@@ -488,9 +488,10 @@ func (c *Coordinator) handleWorkerPolicy(w http.ResponseWriter, r *http.Request)
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 2048)
 	var req struct {
-		WorkerID string `json:"worker_id"`
-		Drain    *bool  `json:"drain"`
-		Disabled *bool  `json:"disabled"`
+		WorkerID string    `json:"worker_id"`
+		Drain    *bool     `json:"drain"`
+		Disabled *bool     `json:"disabled"`
+		Labels   *[]string `json:"labels"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Malformed JSON", "")
@@ -509,6 +510,15 @@ func (c *Coordinator) handleWorkerPolicy(w http.ResponseWriter, r *http.Request)
 	}
 	if req.Disabled != nil {
 		worker.Disabled = *req.Disabled
+	}
+	if req.Labels != nil {
+		// Replaces the label set entirely rather than merging, matching how
+		// Drain/Disabled already behave (last write wins, no partial-update
+		// semantics) -- callers that want to add one label must resend the
+		// full set they want, which is the same contract manifest.Requirements
+		// checks against (workerEligible requires a subset match, not
+		// membership in some larger accumulated history).
+		worker.Labels = append([]string{}, *req.Labels...)
 	}
 	c.Store.Save()
 	json.NewEncoder(w).Encode(worker.ToDTO())
