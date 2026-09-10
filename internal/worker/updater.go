@@ -381,10 +381,11 @@ func rollback(tx *UpdateTransaction) {
 	}
 
 	// PHASE 2: WORKER RESTART
-	phase2Done := false
+	iDidPhase2 := false
+	phase2AlreadyDone := false
 	for {
 		if _, err := os.Stat(t2Base + ".consumed"); err == nil {
-			phase2Done = true
+			phase2AlreadyDone = true
 			break
 		}
 
@@ -440,15 +441,17 @@ func rollback(tx *UpdateTransaction) {
 				log.Printf("[Update] Rollback FAILED to restart the previous worker: %v", err)
 				return
 			}
-			phase2Done = true
+			iDidPhase2 = true
 			break
 		}
 	}
 
-	if phase2Done {
-		tx.CurrentState = "ROLLED_BACK"
-		logWriteTxErr(tx, "ROLLED_BACK")
-		log.Printf("[Update] Rollback initiated. Waiting for previous worker to verify...")
+	if iDidPhase2 || phase2AlreadyDone {
+		if tx.CurrentState != "ROLLED_BACK" {
+			tx.CurrentState = "ROLLED_BACK"
+			logWriteTxErr(tx, "ROLLED_BACK")
+			log.Printf("[Update] Rollback initiated. Waiting for previous worker to verify...")
+		}
 	}
 }
 
