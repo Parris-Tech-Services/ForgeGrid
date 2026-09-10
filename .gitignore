@@ -17,6 +17,12 @@ coordinator_pid.txt
 worker_pid.txt
 coordinator_log.txt
 worker_log.txt
+*.pid
+*-push.yaml
+no-push.yaml
+commit-only.yaml
+push.yaml
+forgegrid-workspace/
 test_output.txt
 *.test
 *.tmp
@@ -25,6 +31,12 @@ Thumbs.db
 .vscode/
 .idea/
 forgegrid
+# git is case-sensitive even on a case-insensitive filesystem: the pattern
+# above never matched the repo-root build output of `go build`, which is
+# capitalized to match the module/binary name (ForgeGrid / ForgeGrid.exe on
+# Windows), so those kept slipping past this ignore and getting committed.
+/ForgeGrid
+/ForgeGrid.exe
 .agents/scripts/bootstrap-crypto/bootstrap-crypto.exe
 encrypted-bundle.bin
 
@@ -37,3 +49,13 @@ hybrid.json
 plain.json
 agentclient.json
 replay-state.json
+coordinator_out.txt
+coord_pid.txt
+*.log
+
+worker_out.txt
+build_test
+dist/ForgeGrid-USB/C:/
+dist/ForgeGrid-USB/Linux/forgegrid
+dist/ForgeGrid-USB/Windows/ForgeGrid.exe
+dist/ForgeGrid-USB/Windows/ForgeGrid-x86.exe
