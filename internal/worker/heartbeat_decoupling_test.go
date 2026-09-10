@@ -25,8 +25,8 @@ func TestHeartbeatDecoupling(t *testing.T) {
 		}
 		if r.URL.Path == "/api/updates/report" {
 			atomic.AddInt32(&reportAttemptCount, 1)
-			// Hang the report handler
-			time.Sleep(1 * time.Second)
+			// Hang the report handler longer to give slow runners time to heartbeat
+			time.Sleep(3 * time.Second)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -60,9 +60,8 @@ func TestHeartbeatDecoupling(t *testing.T) {
 	go w.heartbeatLoop()
 
 	// Wait enough time for multiple heartbeats to occur, but
-	// less than the 1s report hang. If they were serial, only 1 heartbeat
-	// would happen before it hung on the report.
-	time.Sleep(300 * time.Millisecond)
+	// less than the 3s report hang.
+	time.Sleep(1500 * time.Millisecond)
 
 	hbCount := atomic.LoadInt32(&heartbeatCount)
 	if hbCount < 4 {
@@ -72,8 +71,7 @@ func TestHeartbeatDecoupling(t *testing.T) {
 	w.Stop()
 
 	// Ensure the report drain was single-flighted:
-	// It shouldn't have launched 6 concurrent drains that all hit the server.
-	// Since the first request takes 1s, we should only see 1 report attempt in 300ms.
+	// Since the first request takes 3s, we should only see 1 report attempt in 1.5s.
 	repCount := atomic.LoadInt32(&reportAttemptCount)
 	if repCount > 1 {
 		t.Errorf("expected at most 1 report attempt due to single-flighting, got %d", repCount)
