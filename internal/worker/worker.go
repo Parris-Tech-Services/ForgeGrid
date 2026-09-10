@@ -303,11 +303,24 @@ func DetectCapabilities() []string {
 		{"godot", godotOK},
 	}
 	var caps []string
+	seen := make(map[string]bool)
 	for _, check := range checks {
 		if check.ok() {
 			caps = append(caps, check.name)
+			seen[check.name] = true
 		}
 	}
+	
+	for _, p := range agent.RegisteredProviders() {
+		capName := "agent:" + p.ID()
+		if !seen[capName] {
+			if p.Detect(context.Background()).Available {
+				caps = append(caps, capName)
+				seen[capName] = true
+			}
+		}
+	}
+	
 	return caps
 }
 

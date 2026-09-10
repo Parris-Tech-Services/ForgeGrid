@@ -218,15 +218,21 @@ func TestValidateCapabilitiesReportsFullDetectionWhenNoAllowlistIsConfigured(t *
 	}
 }
 
+func TestDetectCapabilitiesIncludesRegisteredAgents(t *testing.T) {
+	caps := DetectCapabilities()
+	// FakeProvider is always available
+	if !hasWorkerString(caps, "agent:fake") {
+		t.Fatalf("expected agent:fake capability to be detected from registered providers, got %#v", caps)
+	}
+}
+
 func TestDetectCapabilitiesIncludesGitAndAIAgentWhenAvailable(t *testing.T) {
 	caps := DetectCapabilities()
 	if _, err := exec.LookPath("git"); err == nil && !hasWorkerString(caps, "git") {
 		t.Fatalf("expected git capability when git is available, got %#v", caps)
 	}
-	if hasWorkerString(caps, "antigravity") || hasWorkerString(caps, "codex") {
-		if !hasWorkerString(caps, "ai-agent") {
-			t.Fatalf("expected ai-agent capability when a coding agent is available, got %#v", caps)
-		}
+	if !hasWorkerString(caps, "agent:fake") {
+		t.Fatalf("expected agent:fake capability, got %#v", caps)
 	}
 }
 
