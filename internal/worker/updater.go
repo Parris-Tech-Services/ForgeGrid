@@ -82,42 +82,53 @@ func writeTx(tx *UpdateTransaction) error {
 }
 
 func reportTxState(tx *UpdateTransaction) {
+	rep := pendingUpdateReport{
+		WorkerID:      tx.WorkerID,
+		UpdateID:      tx.ID,
+		Status:        strings.ToLower(tx.CurrentState),
+		Message:       "Update state changed to " + tx.CurrentState,
+		RollbackReady: false,
+	}
+
 	b, err := os.ReadFile(getWorkerCredsPath())
 	if err != nil {
+		writePendingUpdateReport(rep)
 		return
 	}
 	var creds WorkerCredentials
 	if err := json.Unmarshal(b, &creds); err != nil {
+		writePendingUpdateReport(rep)
 		return
 	}
 
 	payload := map[string]interface{}{
-		"worker_id": tx.WorkerID,
-		"update_id": tx.ID,
-		"status":    strings.ToLower(tx.CurrentState),
-		"message":   "Update state changed to " + tx.CurrentState,
+		"worker_id": rep.WorkerID,
+		"update_id": rep.UpdateID,
+		"status":    rep.Status,
+		"message":   rep.Message,
 	}
 	pb, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest("POST", creds.CoordinatorURL+"/api/updates/report", bytes.NewReader(pb))
+	req, err := http.NewRequest("POST", creds.CoordinatorURL+"/api/updates/report", bytes.NewBuffer(pb))
 	if err == nil {
 		req.Header.Set("Authorization", "Bearer "+creds.Token)
 		client := &http.Client{Timeout: 5 * time.Second}
-		// Match the same TLS model the rest of the worker uses (see
-		// Worker.SetupClient): a bare default client verifies against the
-		// system CA pool, which a self-signed coordinator certificate will
-		// never pass, so every one of these state-change reports would
-		// silently fail the TLS handshake whenever the worker is running
-		// in its normal, non-insecure, fingerprint-pinned configuration -
-		// only the deliberately-insecure case ever actually reached the
-		// coordinator.
 		if creds.Insecure {
 			client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 		} else if creds.Fingerprint != "" {
 			client.Transport = &http.Transport{TLSClientConfig: network.PinTLSConfig(creds.Fingerprint)}
 		}
-		client.Do(req)
+		resp, err := client.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 || resp.StatusCode == http.StatusNotFound {
+				return // Success or superseded
+			}
+		}
 	}
+
+	// If we got here, it failed to send immediately. Persist it for the worker to retry.
+	writePendingUpdateReport(rep)
 }
 
 func fileSHA256(path string) (string, error) {

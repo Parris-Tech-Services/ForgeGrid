@@ -60,7 +60,7 @@ func main() {
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
-	
+
 	startOverall := time.Now()
 
 	var img1, img2 image.Image
@@ -119,7 +119,7 @@ func main() {
 	out, _ := os.Create("/tmp/dadlan-mandelbrot.png")
 	png.Encode(out, finalImg)
 	out.Close()
-	
+
 	endOverall := time.Now()
 
 	fmt.Println("\n--- VERIFICATION ---")

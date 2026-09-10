@@ -295,11 +295,11 @@ func humanCapability(cap string) string {
 		"agent:codex":       "Codex",
 		"agent:antigravity": "Antigravity",
 		"agent:auto":        "Auto AI Agent",
-		"python":      "Python",
-		"go":          "Go",
-		"node":        "Node",
-		"git":         "Git",
-		"godot":       "Godot",
+		"python":            "Python",
+		"go":                "Go",
+		"node":              "Node",
+		"git":               "Git",
+		"godot":             "Godot",
 	}
 	if name := names[cap]; name != "" {
 		return name

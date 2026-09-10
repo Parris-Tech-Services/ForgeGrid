@@ -3,9 +3,9 @@
 package worker
 
 import (
+	"golang.org/x/sys/windows/svc"
 	"os"
 	"os/exec"
-	"golang.org/x/sys/windows/svc"
 )
 
 func detectLifecycleOS() string {
@@ -29,7 +29,7 @@ func (l *windowsServiceLifecycle) Mode() string {
 func (l *windowsServiceLifecycle) Start(tx *UpdateTransaction) error {
 	// The transaction expects us to start the service using the SCM.
 	// ControlService ("start") uses the SCM to start the service.
-	// But we need to pass the txID via environment variable. 
+	// But we need to pass the txID via environment variable.
 	// SCM doesn't let us easily pass environment variables to a specific start.
 	// However, the worker reads `update_tx.json` on startup automatically if it is in VERIFYING_NEW_WORKER or RESTARTING state!
 	// So we don't strictly NEED the FORGEGRID_UPDATE_TX env var if we check for an active transaction on every boot.

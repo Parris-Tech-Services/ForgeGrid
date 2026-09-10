@@ -37,7 +37,7 @@ func TestCopyFileRefusesSamePathInsteadOfSilentlyTruncating(t *testing.T) {
 func TestStagedArtifactPathNeverCollidesWithSource(t *testing.T) {
 	updateDir := "/data/updates/update-1"
 	cases := []string{
-		filepath.Join(updateDir, "downloaded-ForgeGrid.exe"), // real download-path shape
+		filepath.Join(updateDir, "downloaded-ForgeGrid.exe"),                // real download-path shape
 		"/dev/6 Laptops/ForgeGrid/dist/ForgeGrid-USB/Windows/ForgeGrid.exe", // local-candidate-path shape
 		"ForgeGrid.exe",
 	}

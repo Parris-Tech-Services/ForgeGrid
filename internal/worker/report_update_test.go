@@ -1,12 +1,38 @@
 package worker
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// Helper to bridge old tests to the new durable queue
+func readPendingUpdateReport() (*pendingUpdateReport, error) {
+	dir := pendingReportDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			b, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				continue
+			}
+			var rep pendingUpdateReport
+			if err := json.Unmarshal(b, &rep); err == nil {
+				return &rep, nil
+			}
+		}
+	}
+	return nil, os.ErrNotExist
+}
 
 func newTestWorkerForReporting(t *testing.T, coordinatorURL string) *Worker {
 	t.Helper()

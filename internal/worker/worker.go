@@ -56,6 +56,7 @@ type Worker struct {
 	Fingerprint    string
 
 	mu               sync.Mutex
+	reportDrainMu    sync.Mutex
 	activeJobs       map[string]context.CancelFunc
 	stopOnce         sync.Once
 	stopCh           chan struct{}
@@ -310,7 +311,7 @@ func DetectCapabilities() []string {
 			seen[check.name] = true
 		}
 	}
-	
+
 	for _, p := range agent.RegisteredProviders() {
 		capName := "agent:" + p.ID()
 		if !seen[capName] {
@@ -320,7 +321,7 @@ func DetectCapabilities() []string {
 			}
 		}
 	}
-	
+
 	return caps
 }
 
@@ -443,6 +444,8 @@ func (w *Worker) LoadCreds() error {
 // downloadClientTimeout is generous on purpose: it bounds a real artifact
 // transfer to a physical remote machine, not a lightweight poll/report call.
 const downloadClientTimeout = 5 * time.Minute
+
+var artifactDownloadLimit int64 = 50 * 1024 * 1024
 
 func (w *Worker) SetupClient(fingerprint string) {
 	if w.Insecure {
@@ -779,13 +782,15 @@ func (w *Worker) Stop() {
 	w.loopsDone.Wait()
 }
 
+var heartbeatInterval = 5 * time.Second
+
 func (w *Worker) heartbeatLoop() {
 	defer w.loopsDone.Done()
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 	for {
 		w.sendHeartbeat()
-		w.retryPendingUpdateReport()
+		go w.retryPendingUpdateReport()
 		select {
 		case <-w.stopCh:
 			return
@@ -1178,8 +1183,8 @@ var terminalUpdateStatuses = map[string]bool{
 	"rollback_failed": true,
 }
 
-func pendingReportPath() string {
-	return filepath.Join(getWorkerDataDir(), "pending_update_report.json")
+func pendingReportDir() string {
+	return filepath.Join(getWorkerDataDir(), "pending_reports")
 }
 
 type pendingUpdateReport struct {
@@ -1241,14 +1246,17 @@ func (w *Worker) reportUpdate(updateID, status, message string, rollbackReady bo
 }
 
 func writePendingUpdateReport(rep pendingUpdateReport) error {
-	if err := os.MkdirAll(getWorkerDataDir(), 0700); err != nil {
+	dir := pendingReportDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 	b, err := json.Marshal(rep)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(pendingReportPath(), b, 0600)
+	// Use UpdateID as prefix for easy clearance later, append random ID for uniqueness
+	path := filepath.Join(dir, rep.UpdateID+"_"+generateRandomID()+".json")
+	return os.WriteFile(path, b, 0600)
 }
 
 // sendUpdateReportOnce makes exactly one attempt and reports whether the
@@ -1276,37 +1284,53 @@ func (w *Worker) sendUpdateReportOnce(rep pendingUpdateReport) bool {
 }
 
 func (w *Worker) clearPendingUpdateReportIfMatches(updateID string) {
-	pending, err := readPendingUpdateReport()
-	if err != nil || pending.UpdateID != updateID {
+	dir := pendingReportDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return
 	}
-	os.Remove(pendingReportPath())
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), updateID+"_") {
+			os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
 }
 
-func readPendingUpdateReport() (*pendingUpdateReport, error) {
-	b, err := os.ReadFile(pendingReportPath())
-	if err != nil {
-		return nil, err
-	}
-	var rep pendingUpdateReport
-	if err := json.Unmarshal(b, &rep); err != nil {
-		return nil, err
-	}
-	return &rep, nil
-}
+// readPendingUpdateReport has been removed in favor of durable queues
 
 // retryPendingUpdateReport is called once per heartbeat tick (every 5s,
-// via the loop already running for the life of the worker) so a terminal
-// update report that failed all of reportUpdate's immediate bounded
+// configurable in tests). It ensures that a terminal report which failed
 // retries still eventually reaches the coordinator once connectivity
 // recovers, without anything having to block waiting for that to happen.
 func (w *Worker) retryPendingUpdateReport() {
-	pending, err := readPendingUpdateReport()
+	if !w.reportDrainMu.TryLock() {
+		return // Another drain is already in progress
+	}
+	defer w.reportDrainMu.Unlock()
+
+	dir := pendingReportDir()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	if w.sendUpdateReportOnce(*pending) {
-		os.Remove(pendingReportPath())
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rep pendingUpdateReport
+		if err := json.Unmarshal(b, &rep); err == nil {
+			if w.sendUpdateReportOnce(rep) {
+				os.Remove(path)
+			}
+		} else {
+			// Remove corrupted files
+			os.Remove(path)
+		}
 	}
 }
 
@@ -1519,10 +1543,19 @@ func (w *Worker) downloadUpdateArtifact(req fgupdate.Request, updateDir string) 
 	if err != nil {
 		return "", fmt.Errorf("create downloaded artifact file: %w", err)
 	}
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	limitReader := io.LimitReader(resp.Body, artifactDownloadLimit)
+	if _, err := io.Copy(out, limitReader); err != nil {
 		out.Close()
 		return "", fmt.Errorf("save downloaded artifact: %w", err)
 	}
+
+	var buf [1]byte
+	if n, _ := resp.Body.Read(buf[:]); n > 0 {
+		out.Close()
+		os.Remove(dest)
+		return "", fmt.Errorf("download update artifact: size exceeds %d bytes limit", artifactDownloadLimit)
+	}
+
 	if err := out.Close(); err != nil {
 		return "", fmt.Errorf("save downloaded artifact: %w", err)
 	}

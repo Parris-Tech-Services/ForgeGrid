@@ -159,7 +159,7 @@ func TestRollbackCrashPhase2(t *testing.T) {
 	// Backup is completely gone. Phase 2 pending exists.
 	t2Base := filepath.Join(getWorkerDataDir(), "rollback_restart_"+tx.ID)
 	os.WriteFile(t2Base+".pending", []byte{}, 0644)
-	
+
 	// Wait, actually, let's claim it and simulate crash right before consume!
 	os.Rename(t2Base+".pending", t2Base+".claim.crashed")
 

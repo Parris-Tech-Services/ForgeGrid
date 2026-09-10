@@ -212,4 +212,3 @@ func TestWindowsPathJSONEscaping(t *testing.T) {
 		t.Errorf("round-trip failed: got %q, want %q", goodResult[0].RepositoryURL, windowsPath)
 	}
 }
-

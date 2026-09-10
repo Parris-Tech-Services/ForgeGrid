@@ -67,7 +67,7 @@ func TestAtomicClaiming(t *testing.T) {
 			}
 
 			w := httptest.NewRecorder()
-			
+
 			// Extract handler logic to test the specific route
 			mux := http.NewServeMux()
 			mux.HandleFunc("/api/jobs/", c.handleJobAction)
@@ -117,9 +117,9 @@ func TestBatchConcurrency(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		jobID := "job-compute-" + cryptoRandomHex(8)
 		s.Jobs[jobID] = &models.Job{
-			ID:         jobID,
-			Task:       "compute.test",
-			Status:     models.StatusPending,
+			ID:     jobID,
+			Task:   "compute.test",
+			Status: models.StatusPending,
 		}
 	}
 

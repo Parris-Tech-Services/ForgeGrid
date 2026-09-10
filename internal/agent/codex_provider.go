@@ -34,7 +34,7 @@ func (p *CodexProvider) BuildInvocation(req AgentRequest) (AgentInvocation, erro
 
 	// Keep existing arguments matching what was previously executed for Codex
 	args := []string{"exec", "--sandbox", "workspace-write"}
-	
+
 	// Add prompt. The previous mechanism passed parameters which were appended or passed.
 	// If codex expects the prompt as a command-line argument, we do it safely:
 	args = append(args, prompt)

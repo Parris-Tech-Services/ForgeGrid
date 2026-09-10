@@ -173,7 +173,7 @@ func TestRollbackConcurrencyRace(t *testing.T) {
 				mu.Unlock()
 				// Simulate slow restart
 				time.Sleep(200 * time.Millisecond)
-				
+
 				// Simulate the worker verifying its own health
 				tx.CurrentState = "ROLLED_BACK"
 				writeTx(tx)
@@ -251,4 +251,3 @@ func TestRollbackConcurrencyRace(t *testing.T) {
 		t.Fatalf("Start() was executed %d times, expected exactly 1", sc)
 	}
 }
-

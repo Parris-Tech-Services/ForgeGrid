@@ -117,8 +117,8 @@ func TestLoadCredsPersistsNameOverHostname(t *testing.T) {
 
 	// Simulate credentials saved with a custom name
 	creds := WorkerCredentials{
-		WorkerID:       "worker-456",
-		NodeName:       "Custom-Name",
+		WorkerID: "worker-456",
+		NodeName: "Custom-Name",
 	}
 	path := getWorkerCredsPath()
 	os.MkdirAll(filepath.Dir(path), 0700)
