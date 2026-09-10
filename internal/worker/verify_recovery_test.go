@@ -108,6 +108,10 @@ func TestVerifyUpdateTransactionRecoversAfterVerificationFailureAcrossRestart(t 
 	os.WriteFile(primary, []byte("broken-candidate-binary"), 0755)
 	os.WriteFile(backup, []byte("known-good-old-binary"), 0755)
 
+	originalVerifyPoll := verifyPollInterval
+	verifyPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { verifyPollInterval = originalVerifyPoll })
+
 	originalLaunch := launchUpdaterHelper
 	launchUpdaterHelper = func(path string) error {
 		// Simulate "a fresh process starts and runs -mode update-helper"
@@ -117,6 +121,25 @@ func TestVerifyUpdateTransactionRecoversAfterVerificationFailureAcrossRestart(t 
 		return nil
 	}
 	t.Cleanup(func() { launchUpdaterHelper = originalLaunch })
+
+	originalLifecycle := GetLifecycle
+	GetLifecycle = func(mode string) Lifecycle {
+		return &fakeLifecycle{
+			mode: mode,
+			startFn: func(tx *UpdateTransaction) error {
+				go func() {
+					time.Sleep(5 * time.Millisecond)
+					latest, err := readTx()
+					if err == nil {
+						latest.CurrentState = "ROLLED_BACK"
+						writeTx(latest)
+					}
+				}()
+				return nil
+			},
+		}
+	}
+	t.Cleanup(func() { GetLifecycle = originalLifecycle })
 
 	tx := &UpdateTransaction{
 		ID:                "tx-restart-recovery",

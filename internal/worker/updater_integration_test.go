@@ -74,11 +74,33 @@ func TestUpdaterIntegrationSuccessfulUpdate(t *testing.T) {
 }
 
 func TestUpdaterIntegrationRollback(t *testing.T) {
+	originalVerifyPoll := verifyPollInterval
+	verifyPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { verifyPollInterval = originalVerifyPoll })
+
 	// 36. Local deterministic rollback test
 	tmp := t.TempDir()
 	setSandboxedDataDir(t, tmp)
-	useFakeLifecycle(t, nil)
+	setSandboxedDataDir(t, tmp)
 
+	originalLifecycle := GetLifecycle
+	GetLifecycle = func(mode string) Lifecycle {
+		return &fakeLifecycle{
+			mode: mode,
+			startFn: func(tx *UpdateTransaction) error {
+				go func() {
+					time.Sleep(5 * time.Millisecond)
+					latest, err := readTx()
+					if err == nil {
+						latest.CurrentState = "ROLLED_BACK"
+						writeTx(latest)
+					}
+				}()
+				return nil
+			},
+		}
+	}
+	t.Cleanup(func() { GetLifecycle = originalLifecycle })
 	updateDir := filepath.Join(getWorkerDataDir(), "updates")
 	os.MkdirAll(updateDir, 0755)
 
@@ -198,7 +220,7 @@ func TestRollbackConcurrencyRace(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		// Launch slightly after to let the first one claim Phase 1
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 		rollback(tx)
 	}()
 
