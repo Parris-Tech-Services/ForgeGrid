@@ -120,7 +120,6 @@ func TestUpdaterIntegrationRollback(t *testing.T) {
 func TestRollbackConcurrencyRace(t *testing.T) {
 	tmp := t.TempDir()
 	setSandboxedDataDir(t, tmp)
-	useFakeLifecycle(t, nil)
 
 	updateDir := filepath.Join(getWorkerDataDir(), "updates")
 	os.MkdirAll(updateDir, 0755)
@@ -139,6 +138,36 @@ func TestRollbackConcurrencyRace(t *testing.T) {
 	}
 	writeTx(tx)
 
+	var mu sync.Mutex
+	var startCount, replaceCount int
+
+	originalLifecycle := GetLifecycle
+	GetLifecycle = func(mode string) Lifecycle {
+		return &fakeLifecycle{
+			mode: mode,
+			startFn: func(tx *UpdateTransaction) error {
+				mu.Lock()
+				startCount++
+				mu.Unlock()
+				// Simulate slow restart
+				time.Sleep(200 * time.Millisecond)
+				return nil
+			},
+		}
+	}
+	t.Cleanup(func() { GetLifecycle = originalLifecycle })
+
+	originalReplace := safeReplace
+	safeReplace = func(newPath, destPath string) error {
+		mu.Lock()
+		replaceCount++
+		mu.Unlock()
+		// Simulate slow file operations
+		time.Sleep(200 * time.Millisecond)
+		return originalReplace(newPath, destPath)
+	}
+	t.Cleanup(func() { safeReplace = originalReplace })
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -149,6 +178,8 @@ func TestRollbackConcurrencyRace(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
+		// Launch slightly after to let the first one claim Phase 1
+		time.Sleep(50 * time.Millisecond)
 		rollback(tx)
 	}()
 
@@ -166,4 +197,17 @@ func TestRollbackConcurrencyRace(t *testing.T) {
 	if string(b) != "backup" {
 		t.Fatalf("Primary was not restored properly, got %s", string(b))
 	}
+
+	mu.Lock()
+	sc := startCount
+	rc := replaceCount
+	mu.Unlock()
+
+	if rc != 1 {
+		t.Fatalf("safeReplace was executed %d times, expected exactly 1", rc)
+	}
+	if sc != 1 {
+		t.Fatalf("Start() was executed %d times, expected exactly 1", sc)
+	}
 }
+

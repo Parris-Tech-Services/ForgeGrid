@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
@@ -224,7 +225,7 @@ func RunUpdater() {
 // way first, then renaming the replacement in, avoids requiring a
 // rename-over-existing to succeed at all; if the final rename fails, the
 // original file is restored so destPath is never left missing.
-func safeReplace(newPath, destPath string) error {
+var safeReplace = func(newPath, destPath string) error {
 	replacedPath := destPath + ".replaced"
 	hadExisting := false
 	if _, err := os.Stat(destPath); err == nil {
@@ -297,13 +298,15 @@ func waitForHealth(tx *UpdateTransaction) error {
 	return fmt.Errorf("timeout waiting for healthy heartbeat from new worker")
 }
 
+func generateRandomID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+var stealWaitDuration = 10 * time.Second
+
 func rollback(tx *UpdateTransaction) {
-	// Re-read the latest on-disk state rather than trusting only the
-	// in-memory tx the caller holds: this function can legitimately be
-	// invoked twice for the same transaction from two different processes
-	// (the original updater helper's waitForHealth() deadline, and the
-	// candidate worker's own failCandidateVerification() relaunching a
-	// fresh helper). If a prior call already finished, bail out early.
 	if current, err := readTx(); err == nil && current.ID == tx.ID {
 		switch current.CurrentState {
 		case "ROLLED_BACK", "ROLLBACK_FAILED", "COMPLETED":
@@ -312,71 +315,141 @@ func rollback(tx *UpdateTransaction) {
 		}
 	}
 
-	claimedPath := tx.BackupBinaryPath + ".rollback_claim"
-	owned := false
+	myID := generateRandomID()
+	t1Base := tx.BackupBinaryPath
+	t2Base := filepath.Join(getWorkerDataDir(), "rollback_restart_"+tx.ID)
 
-	// Attempt atomic claim by renaming the backup file
-	if err := os.Rename(tx.BackupBinaryPath, claimedPath); err == nil {
-		owned = true
-	} else if os.IsNotExist(err) {
-		if _, statErr := os.Stat(claimedPath); statErr == nil {
-			// The claim file exists, meaning another process already claimed it.
-			log.Printf("[Update] Rollback claimed by another process. Waiting for resolution...")
-			deadline := time.Now().Add(30 * time.Second)
-			for time.Now().Before(deadline) {
-				if current, err := readTx(); err == nil && current.ID == tx.ID {
-					switch current.CurrentState {
-					case "ROLLED_BACK", "ROLLBACK_FAILED", "COMPLETED":
-						return // The other process finished
-					}
-				}
-				time.Sleep(1 * time.Second)
+	phase1Done := false
+
+	// PHASE 1: BINARY RESTORE
+	for {
+		hasBase := false
+		if _, err := os.Stat(t1Base); err == nil {
+			hasBase = true
+		}
+
+		existingClaims, _ := filepath.Glob(t1Base + ".claim.*")
+
+		if !hasBase && len(existingClaims) == 0 {
+			phase1Done = true
+			break
+		}
+
+		myClaim := t1Base + ".claim." + myID
+		claimed := false
+
+		if hasBase {
+			if err := os.Rename(t1Base, myClaim); err == nil {
+				claimed = true
 			}
-			// If we timed out, assume the owner crashed and take over
-			log.Printf("[Update] Rollback owner timed out. Taking over rollback execution.")
-			owned = true
-		} else {
+		} else if len(existingClaims) > 0 {
+			log.Printf("[Update] Phase 1 token claimed by another actor. Waiting to steal...")
+			time.Sleep(stealWaitDuration)
+			if err := os.Rename(existingClaims[0], myClaim); err == nil {
+				claimed = true
+				log.Printf("[Update] Stole Phase 1 token.")
+			}
+		}
+
+		if claimed {
+			// Prepare Phase 2 token BEFORE consuming Phase 1 token
+			os.WriteFile(t2Base+".pending", []byte{}, 0644)
+
+			log.Printf("[Update] Rolling back: %s", tx.RollbackReason)
+			tx.CurrentState = "ROLLING_BACK"
+			logWriteTxErr(tx, "ROLLING_BACK")
+
+			// Consume Phase 1 token
+			if err := safeReplace(myClaim, tx.OldBinaryPath); err != nil {
+				if os.IsNotExist(err) {
+					log.Printf("[Update] Fenced out of Phase 1! Retrying discovery.")
+					continue
+				}
+				tx.CurrentState = "ROLLBACK_FAILED"
+				tx.RollbackReason = tx.RollbackReason + " | restore from backup failed: " + err.Error()
+				logWriteTxErr(tx, "ROLLBACK_FAILED (restore)")
+				log.Printf("[Update] Rollback FAILED to restore the previous binary: %v", err)
+				return
+			}
+			phase1Done = true
+			break
+		}
+	}
+
+	if !phase1Done {
+		return
+	}
+
+	// PHASE 2: WORKER RESTART
+	phase2Done := false
+	for {
+		if _, err := os.Stat(t2Base + ".consumed"); err == nil {
+			phase2Done = true
+			break
+		}
+
+		hasPending := false
+		if _, err := os.Stat(t2Base + ".pending"); err == nil {
+			hasPending = true
+		}
+
+		existingClaims, _ := filepath.Glob(t2Base + ".claim.*")
+
+		if !hasPending && len(existingClaims) == 0 {
 			tx.CurrentState = "ROLLBACK_FAILED"
 			tx.RollbackReason = tx.RollbackReason + " | restore from backup failed: backup binary missing"
 			logWriteTxErr(tx, "ROLLBACK_FAILED (missing backup)")
 			return
 		}
-	} else {
-		tx.CurrentState = "ROLLBACK_FAILED"
-		tx.RollbackReason = tx.RollbackReason + " | could not claim rollback ownership: " + err.Error()
-		logWriteTxErr(tx, "ROLLBACK_FAILED (claim failed)")
-		return
+
+		myClaim := t2Base + ".claim." + myID
+		claimed := false
+
+		if hasPending {
+			if err := os.Rename(t2Base+".pending", myClaim); err == nil {
+				claimed = true
+			}
+		} else if len(existingClaims) > 0 {
+			log.Printf("[Update] Phase 2 token claimed by another actor. Waiting to steal...")
+			time.Sleep(stealWaitDuration)
+			if err := os.Rename(existingClaims[0], myClaim); err == nil {
+				claimed = true
+				log.Printf("[Update] Stole Phase 2 token.")
+			}
+		}
+
+		if claimed {
+			// Consume Phase 2 token
+			if err := os.Rename(myClaim, t2Base+".consumed"); err != nil {
+				if os.IsNotExist(err) {
+					log.Printf("[Update] Fenced out of Phase 2! Retrying discovery.")
+					continue
+				}
+				tx.CurrentState = "ROLLBACK_FAILED"
+				tx.RollbackReason = tx.RollbackReason + " | could not consume restart token: " + err.Error()
+				logWriteTxErr(tx, "ROLLBACK_FAILED (token error)")
+				return
+			}
+
+			// Authorized to restart exactly once
+			log.Printf("[Update] Restarting previous worker...")
+			if err := GetLifecycle(tx.LifecycleMode).Start(tx); err != nil {
+				tx.CurrentState = "ROLLBACK_FAILED"
+				tx.RollbackReason = tx.RollbackReason + " | restart of restored binary failed: " + err.Error()
+				logWriteTxErr(tx, "ROLLBACK_FAILED (restart)")
+				log.Printf("[Update] Rollback FAILED to restart the previous worker: %v", err)
+				return
+			}
+			phase2Done = true
+			break
+		}
 	}
 
-	if !owned {
-		return
+	if phase2Done {
+		tx.CurrentState = "ROLLED_BACK"
+		logWriteTxErr(tx, "ROLLED_BACK")
+		log.Printf("[Update] Rollback initiated. Waiting for previous worker to verify...")
 	}
-
-	log.Printf("[Update] Rolling back: %s", tx.RollbackReason)
-	tx.CurrentState = "ROLLING_BACK"
-	logWriteTxErr(tx, "ROLLING_BACK")
-
-	// Use the claimed path for the restore
-	if err := safeReplace(claimedPath, tx.OldBinaryPath); err != nil {
-		tx.CurrentState = "ROLLBACK_FAILED"
-		tx.RollbackReason = tx.RollbackReason + " | restore from backup failed: " + err.Error()
-		logWriteTxErr(tx, "ROLLBACK_FAILED (restore)")
-		log.Printf("[Update] Rollback FAILED to restore the previous binary: %v", err)
-		return
-	}
-
-	log.Printf("[Update] Restarting previous worker...")
-	if err := GetLifecycle(tx.LifecycleMode).Start(tx); err != nil {
-		tx.CurrentState = "ROLLBACK_FAILED"
-		tx.RollbackReason = tx.RollbackReason + " | restart of restored binary failed: " + err.Error()
-		logWriteTxErr(tx, "ROLLBACK_FAILED (restart)")
-		log.Printf("[Update] Rollback FAILED to restart the previous worker: %v", err)
-		return
-	}
-
-	tx.CurrentState = "ROLLED_BACK"
-	logWriteTxErr(tx, "ROLLED_BACK")
-	log.Printf("[Update] Rollback initiated. Waiting for previous worker to verify...")
 }
 
 // logWriteTxErr persists tx and, on failure, logs it clearly rather than
