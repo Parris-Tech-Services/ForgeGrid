@@ -2,15 +2,19 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"forgegrid/internal/models"
 )
 
 func TestFakeAgentIntegrationPipeline(t *testing.T) {
@@ -54,7 +58,13 @@ git commit -m "Initial commit"
 		w.Write([]byte(`{"update": null}`))
 	})
 
-	// Mock job assignment
+	// Mock job assignment — use json.Marshal to build the response so that
+	// Windows paths (containing backslashes) are properly escaped.  The
+	// previous implementation string-interpolated remoteRepo directly into
+	// a JSON template literal; on Windows the resulting \U, \T, \A, etc.
+	// sequences are invalid JSON escapes, causing json.Decoder on the
+	// client side to fail silently.  The worker never decoded the job,
+	// never claimed it, and the test timed out.
 	jobAssigned := false
 	mux.HandleFunc("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 		if jobAssigned {
@@ -65,29 +75,34 @@ git commit -m "Initial commit"
 		jobAssigned = true
 		w.Header().Set("Content-Type", "application/json")
 
-		w.Write([]byte(`[{
-			"id": "job-fake-1",
-			"status": "PENDING",
-			"task_name": "ai_task",
-			"task": "execute",
-			"profile": "ai",
-			"agent_requested": "fake",
-			"repository_url": "` + remoteRepo + `",
-			"base_commit": "main",
-			"branch_name": "forgegrid/test-branch",
-			"commit_changes": true,
-			"push_changes": false,
-			"commit_message": "Agent changed something",
-			"timeout_seconds": 60,
-			"stages": [
-				{
-					"name": "Agent",
-					"profile": "ai",
-					"timeout_seconds": 60,
-					"parameters": {"prompt": "CHANGE the file"}
-				}
-			]
-		}]`))
+		jobs := []models.Job{{
+			ID:             "job-fake-1",
+			Status:         models.StatusPending,
+			TaskName:       "ai_task",
+			Task:           "execute",
+			Profile:        "ai",
+			AgentRequested: "fake",
+			RepositoryURL:  remoteRepo,
+			BaseCommit:     "main",
+			BranchName:     "forgegrid/test-branch",
+			CommitChanges:  true,
+			PushChanges:    false,
+			CommitMessage:  "Agent changed something",
+			TimeoutSeconds: 60,
+			Stages: []models.JobStage{{
+				Name:           "Agent",
+				Profile:        "ai",
+				TimeoutSeconds: 60,
+				Parameters:     map[string]string{"prompt": "CHANGE the file"},
+			}},
+		}}
+		resp, err := json.Marshal(jobs)
+		if err != nil {
+			t.Errorf("failed to marshal job response: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write(resp)
 	})
 
 	mux.HandleFunc("/api/jobs/job-fake-1/claim", func(w http.ResponseWriter, r *http.Request) {
@@ -156,3 +171,45 @@ git commit -m "Initial commit"
 		}
 	}
 }
+
+// TestWindowsPathJSONEscaping is a regression test for the bug where Windows
+// filesystem paths (containing backslashes) were directly string-interpolated
+// into JSON template literals. On Windows, paths like C:\Users\foo produce
+// invalid JSON escape sequences (\U, \f, etc.), causing json.Decoder to fail.
+// This resulted in the worker silently failing to decode job assignments,
+// never claiming jobs, and integration tests timing out.
+func TestWindowsPathJSONEscaping(t *testing.T) {
+	// Simulate a Windows-style path with backslashes
+	windowsPath := `C:\Users\RUNNER~1\AppData\Local\Temp\TestFake\001\remote-repo`
+
+	// This is what the old code did: direct string interpolation
+	badJSON := `[{"repository_url": "` + windowsPath + `"}]`
+	var badResult []map[string]interface{}
+	err := json.Unmarshal([]byte(badJSON), &badResult)
+	if runtime.GOOS == "windows" || true {
+		// The old approach produces invalid JSON on Windows paths
+		if err == nil {
+			t.Log("Note: JSON happened to decode (path may not contain problematic escapes)")
+		} else {
+			t.Logf("Confirmed: direct interpolation produces invalid JSON: %v", err)
+		}
+	}
+
+	// This is what the fixed code does: proper JSON marshaling
+	type job struct {
+		RepositoryURL string `json:"repository_url"`
+	}
+	goodJSON, err := json.Marshal([]job{{RepositoryURL: windowsPath}})
+	if err != nil {
+		t.Fatalf("json.Marshal should never fail on a simple struct: %v", err)
+	}
+
+	var goodResult []job
+	if err := json.Unmarshal(goodJSON, &goodResult); err != nil {
+		t.Fatalf("properly marshaled JSON should decode: %v", err)
+	}
+	if goodResult[0].RepositoryURL != windowsPath {
+		t.Errorf("round-trip failed: got %q, want %q", goodResult[0].RepositoryURL, windowsPath)
+	}
+}
+

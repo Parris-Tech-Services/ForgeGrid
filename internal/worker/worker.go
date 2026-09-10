@@ -963,6 +963,9 @@ func (w *Worker) pollJobs() {
 
 	var jobs []models.Job
 	if err := json.NewDecoder(resp.Body).Decode(&jobs); err != nil {
+		if err != io.EOF {
+			log.Printf("[Worker %s] Failed to decode jobs response: %v", w.WorkerID, err)
+		}
 		return
 	}
 
