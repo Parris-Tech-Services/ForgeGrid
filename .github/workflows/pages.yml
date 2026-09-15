@@ -29,13 +29,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Prepare static site
+        run: |
+          mkdir -p _pages
+          cp site/index.html _pages/index.html
+          sed -i 's#../Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md#https://github.com/joshualparris/ForgeGrid/blob/main/Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md#g' _pages/index.html
+
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
       - name: Upload static planner
         uses: actions/upload-pages-artifact@v4
         with:
-          path: site
+          path: _pages
 
       - name: Deploy to GitHub Pages
         id: deployment
