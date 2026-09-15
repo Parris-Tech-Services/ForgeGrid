@@ -1,0 +1,48 @@
+name: Deploy hardware planner to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'site/**'
+      - 'Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Prepare static site
+        run: |
+          mkdir -p _pages
+          cp site/index.html _pages/index.html
+          sed -i 's#../Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md#https://github.com/joshualparris/ForgeGrid/blob/main/Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md#g' _pages/index.html
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload static planner
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _pages
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

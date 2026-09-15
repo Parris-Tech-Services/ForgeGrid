@@ -11,6 +11,15 @@ ForgeGrid is a portable local-network development cluster for distributing game-
 - Optional AI coding-agent tasks
 - Packaging and release creation
 
+## AI workstation & hardware planning
+
+ForgeGrid now includes a consolidated hardware guide covering the DadLAN/Avance fleet, local AI, browser automation, ChatGPT desktop workloads, mini-PC trade-offs and the current Shannon workstation procurement case.
+
+- **Live hardware planner:** https://joshualparris.github.io/ForgeGrid/
+- **Full guide:** [Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md](Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md)
+
+The current workstation recommendation is a 64 GB, 2 TB NVMe, well-cooled conventional desktop when a builder can deliver one near the cost of the Minisforum MS-A2; the MS-A2 remains a strong compact alternative when its size, networking or price advantage matters.
+
 ## Features
 
 - **No External Dependencies**: ForgeGrid ships as a single compiled binary for Windows and Linux with zero external database dependencies.
@@ -51,3 +60,4 @@ Please refer to [SECURITY.md](SECURITY.md) for detailed information on how Forge
 - [ARCHITECTURE.md](ARCHITECTURE.md) - System architecture and workflow details.
 - [ACCEPTANCE_TESTS.md](ACCEPTANCE_TESTS.md) - Outlines end-to-end functionality guarantees.
 - [RELEASE_NOTES.md](RELEASE_NOTES.md) - Changelog and specific version statuses.
+- [Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md](Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md) - AI workstation, browser automation, local-AI and fleet hardware guidance.
