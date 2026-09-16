@@ -29,11 +29,6 @@ func TestRollbackCrashPhase1(t *testing.T) {
 	}
 	writeTx(tx)
 
-	// Speed up tests
-	originalStealWait := stealWaitDuration
-	stealWaitDuration = 10 * time.Millisecond
-	t.Cleanup(func() { stealWaitDuration = originalStealWait })
-
 	originalVerifyPoll := verifyPollInterval
 	verifyPollInterval = 10 * time.Millisecond
 	t.Cleanup(func() { verifyPollInterval = originalVerifyPoll })
@@ -71,10 +66,12 @@ func TestRollbackCrashPhase1(t *testing.T) {
 	t.Cleanup(func() { safeReplace = originalReplace })
 
 	// SIMULATE CRASH IN PHASE 1 BEFORE safeReplace
-	// A crashed worker leaves the claim file but never resumes.
+	// A crashed worker leaves the claim file but never resumes, and never
+	// wrote (or stopped refreshing) a lease - claimIsLive is false
+	// immediately, so the second actor steals without waiting.
 	os.Rename(backupPath, backupPath+".claim.crashed")
 
-	// The second worker arrives, sees the claim, waits, steals it, and finishes.
+	// The second worker arrives, sees the abandoned (unleased) claim, steals it, and finishes.
 	rollback(tx)
 
 	current, _ := readTx()
@@ -114,10 +111,6 @@ func TestRollbackCrashPhase2(t *testing.T) {
 		LifecycleMode:    "portable",
 	}
 	writeTx(tx)
-
-	originalStealWait := stealWaitDuration
-	stealWaitDuration = 10 * time.Millisecond
-	t.Cleanup(func() { stealWaitDuration = originalStealWait })
 
 	originalVerifyPoll := verifyPollInterval
 	verifyPollInterval = 10 * time.Millisecond
@@ -161,6 +154,7 @@ func TestRollbackCrashPhase2(t *testing.T) {
 	os.WriteFile(t2Base+".pending", []byte{}, 0644)
 
 	// Wait, actually, let's claim it and simulate crash right before consume!
+	// No lease was ever written for this claim, so it is stolen immediately.
 	os.Rename(t2Base+".pending", t2Base+".claim.crashed")
 
 	rollback(tx)
@@ -202,10 +196,6 @@ func TestRollbackCrashPhase3(t *testing.T) {
 		LifecycleMode:    "portable",
 	}
 	writeTx(tx)
-
-	originalStealWait := stealWaitDuration
-	stealWaitDuration = 10 * time.Millisecond
-	t.Cleanup(func() { stealWaitDuration = originalStealWait })
 
 	originalVerifyPoll := verifyPollInterval
 	verifyPollInterval = 10 * time.Millisecond

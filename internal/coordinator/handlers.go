@@ -822,6 +822,18 @@ func (c *Coordinator) handleUpdateArtifactDownload(w http.ResponseWriter, r *htt
 	http.ServeContent(w, r, filepath.Base(full), info.ModTime(), f)
 }
 
+// terminalUpdateReportStatuses mirrors the worker's own
+// terminalUpdateStatuses (internal/worker/worker.go): once an update
+// request reaches one of these, nothing else will legitimately change it
+// again, so a later report claiming a non-terminal status is necessarily
+// stale.
+var terminalUpdateReportStatuses = map[string]bool{
+	"completed":       true,
+	"failed":          true,
+	"rolled_back":     true,
+	"rollback_failed": true,
+}
+
 func (c *Coordinator) handleWorkerUpdateReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Method not allowed", "")
@@ -849,6 +861,18 @@ func (c *Coordinator) handleWorkerUpdateReport(w http.ResponseWriter, r *http.Re
 	}
 	if worker.UpdateRequest == nil || worker.UpdateRequest.ID != req.UpdateID {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Update request not found", "")
+		return
+	}
+	// A stale, delayed report (e.g. the worker's own durable-retry queue
+	// redelivering an earlier "running" report after a later "completed"
+	// one already landed - see retryPendingUpdateReport, which has no
+	// way to know a newer report already succeeded) must never regress
+	// an already-terminal status back to a non-terminal one. Accept and
+	// acknowledge it (so the worker correctly stops retrying something
+	// that is, from the coordinator's perspective, already moot) without
+	// mutating state.
+	if terminalUpdateReportStatuses[worker.UpdateRequest.Status] && !terminalUpdateReportStatuses[req.Status] {
+		json.NewEncoder(w).Encode(worker.ToDTO())
 		return
 	}
 	worker.UpdateRequest.Status = req.Status

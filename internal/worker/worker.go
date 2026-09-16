@@ -57,6 +57,7 @@ type Worker struct {
 
 	mu               sync.Mutex
 	reportDrainMu    sync.Mutex
+	jobReportDrainMu sync.Mutex
 	activeJobs       map[string]context.CancelFunc
 	stopOnce         sync.Once
 	stopCh           chan struct{}
@@ -643,7 +644,12 @@ func (w *Worker) verifyUpdateTransaction() {
 		return
 	}
 
-	if tx.CurrentState == "COMPLETED" || tx.CurrentState == "ROLLED_BACK" || tx.CurrentState == "ROLLBACK_FAILED" {
+	if tx.CurrentState == "COMPLETED" || tx.CurrentState == "ROLLED_BACK" || tx.CurrentState == "ROLLBACK_FAILED" || tx.CurrentState == "FAILED" {
+		return
+	}
+
+	if tx.CurrentState == "STAGED" || tx.CurrentState == "APPLYING" {
+		w.recoverStagedOrApplying(tx)
 		return
 	}
 
@@ -681,6 +687,17 @@ func (w *Worker) verifyUpdateTransaction() {
 		return
 	}
 
+	w.verifyCandidate(tx)
+}
+
+// verifyCandidate performs the candidate worker's own post-swap health
+// check: hash the running executable against the expected candidate
+// hash, confirm it can reach the coordinator, and report completion.
+// Extracted from verifyUpdateTransaction so recoverStagedOrApplying can
+// reuse it directly for the case where an APPLYING transaction's swap is
+// found (by hash, not by trusting the stale label) to have already
+// succeeded before a crash.
+func (w *Worker) verifyCandidate(tx *UpdateTransaction) {
 	log.Printf("[Update] Candidate installed")
 	log.Printf("[Update] Starting candidate worker")
 	log.Printf("[Update] Waiting for coordinator handshake")
@@ -714,6 +731,148 @@ func (w *Worker) verifyUpdateTransaction() {
 	tx.CurrentState = "COMPLETED"
 	logWriteTxErr(tx, "COMPLETED")
 	log.Printf("[Update] Transaction completed")
+}
+
+// recoverStagedOrApplying handles a worker starting up (crash, reboot, or
+// an SCM auto-restart) with a persisted transaction still in STAGED or
+// APPLYING - the two states verifyUpdateTransaction previously had no
+// branch for at all, silently abandoning the transaction and leaving the
+// coordinator believing the update was still "running" forever.
+func (w *Worker) recoverStagedOrApplying(tx *UpdateTransaction) {
+	if tx.CurrentState == "STAGED" {
+		w.recoverStaged(tx)
+		return
+	}
+	w.recoverApplying(tx)
+}
+
+// recoverStaged handles a restart while CurrentState is still STAGED.
+// writeTx(APPLYING) always happens in RunUpdater before swapBinaries is
+// ever called, so a persisted STAGED state proves the swap itself never
+// started: OldBinaryPath is provably untouched. Nothing destructive has
+// happened, so recovery only ever needs to either resume (relaunch the
+// updater helper against the still-staged candidate) or fail closed and
+// let the coordinator queue a fresh update - never a binary restore.
+func (w *Worker) recoverStaged(tx *UpdateTransaction) {
+	exe, err := os.Executable()
+	if err != nil {
+		w.failStagedRecovery(tx, "could not locate running executable: "+err.Error())
+		return
+	}
+	hash, err := fileSHA256(exe)
+	if err != nil {
+		w.failStagedRecovery(tx, "could not hash running executable: "+err.Error())
+		return
+	}
+	if tx.OldSHA256 != "" && hash != tx.OldSHA256 {
+		w.failStagedRecovery(tx, "running binary does not match the recorded pre-update hash; will not guess")
+		return
+	}
+	newHash, err := fileSHA256(tx.NewBinaryPath)
+	if err != nil {
+		w.failStagedRecovery(tx, "staged candidate artifact is missing or unreadable: "+err.Error())
+		return
+	}
+	if tx.ExpectedSHA256 != "" && newHash != tx.ExpectedSHA256 {
+		w.failStagedRecovery(tx, "staged candidate artifact failed checksum verification on resume")
+		return
+	}
+	if _, err := os.Stat(tx.UpdaterHelperPath); err != nil {
+		w.failStagedRecovery(tx, "updater helper copy is missing: "+err.Error())
+		return
+	}
+
+	log.Printf("[Update] Resuming STAGED transaction %s after restart", tx.ID)
+	w.reportUpdate(tx.ID, "running", "Resumed staged update after a worker restart", false)
+	if err := launchUpdaterHelper(tx.UpdaterHelperPath); err != nil {
+		w.failStagedRecovery(tx, "could not relaunch updater helper: "+err.Error())
+		return
+	}
+	// Mirrors stageUpdate's own end-of-flow: get out of the way so the
+	// freshly relaunched helper can perform the swap.
+	osExit(0)
+}
+
+// failStagedRecovery abandons a STAGED transaction cleanly: nothing
+// destructive has happened (see recoverStaged), so the only obligations
+// are telling the coordinator and clearing local state so a fresh update
+// can be queued and attempted later.
+func (w *Worker) failStagedRecovery(tx *UpdateTransaction, reason string) {
+	log.Printf("[Update] STAGED recovery failing closed: %s", reason)
+	tx.CurrentState = "FAILED"
+	tx.RollbackReason = reason
+	logWriteTxErr(tx, "FAILED (staged recovery)")
+	w.reportUpdate(tx.ID, "failed", "Update abandoned after restart: "+reason, false)
+}
+
+// recoverApplying handles a restart while CurrentState is still APPLYING -
+// meaning a crash landed somewhere inside swapBinaries, and the persisted
+// label alone cannot say which side of the swap actually completed. It
+// inspects the real on-disk binaries by hash (inspectSwapState) rather
+// than guessing, and only ever fails closed via the existing, well-tested
+// rollback() when the state can't be proven safe.
+func (w *Worker) recoverApplying(tx *UpdateTransaction) {
+	switch inspectSwapState(tx) {
+	case swapNotStarted:
+		log.Printf("[Update] APPLYING recovery: swap never completed and the pre-update binary is intact; retrying the swap for %s", tx.ID)
+		if err := swapBinaries(tx); err != nil {
+			tx.RollbackReason = "Swap retry after restart failed: " + err.Error()
+			rollback(tx)
+			return
+		}
+		tx.CurrentState = "RESTARTING"
+		if err := writeTx(tx); err != nil {
+			tx.RollbackReason = "Could not persist RESTARTING state after resumed swap: " + err.Error()
+			rollback(tx)
+			return
+		}
+		if err := GetLifecycle(tx.LifecycleMode).Start(tx); err != nil {
+			tx.RollbackReason = "Start failed after resumed swap: " + err.Error()
+			rollback(tx)
+			return
+		}
+		tx.CurrentState = "VERIFYING_NEW_WORKER"
+		logWriteTxErr(tx, "VERIFYING_NEW_WORKER (resumed from APPLYING)")
+		// This process is still the pre-update binary - it is not the
+		// candidate that Start() above just launched, so it must not go
+		// on to run verifyCandidate itself. A fresh process (the one
+		// Start() just launched) will do that on its own startup.
+		osExit(0)
+
+	case swapAlreadyApplied:
+		// The rename already landed before the crash. Whichever process
+		// is running this code IS the candidate, since OldBinaryPath now
+		// holds the new binary by construction - re-enter exactly where
+		// VERIFYING_NEW_WORKER already handles this, rather than
+		// duplicating that logic.
+		log.Printf("[Update] APPLYING recovery: swap already completed before the restart; resuming verification for %s", tx.ID)
+		tx.CurrentState = "VERIFYING_NEW_WORKER"
+		logWriteTxErr(tx, "VERIFYING_NEW_WORKER (recovered from APPLYING)")
+		w.verifyCandidate(tx)
+
+	case swapInterruptedRestorable:
+		log.Printf("[Update] APPLYING recovery: crash during the binary swap; restoring the previous binary from safeReplace's side-copy for %s", tx.ID)
+		if err := os.Rename(tx.OldBinaryPath+".replaced", tx.OldBinaryPath); err != nil {
+			tx.RollbackReason = "Could not restore previous binary after an interrupted swap: " + err.Error()
+			rollback(tx)
+			return
+		}
+		if hash, err := fileSHA256(tx.OldBinaryPath); err != nil || (tx.OldSHA256 != "" && hash != tx.OldSHA256) {
+			tx.CurrentState = "ROLLBACK_FAILED"
+			tx.RollbackReason = "Restored binary failed hash verification after an interrupted swap"
+			logWriteTxErr(tx, "ROLLBACK_FAILED (interrupted swap restore)")
+			w.reportUpdate(tx.ID, "rollback_failed", tx.RollbackReason, true)
+			return
+		}
+		tx.CurrentState = "ROLLED_BACK"
+		logWriteTxErr(tx, "ROLLED_BACK (interrupted swap)")
+		w.reportUpdate(tx.ID, "rolled_back", "Previous binary restored after a crash during the binary swap", true)
+
+	default: // swapAmbiguous
+		log.Printf("[Update] APPLYING recovery: on-disk binary state for %s cannot be determined safely; failing closed via rollback()", tx.ID)
+		tx.RollbackReason = "APPLYING recovery could not determine on-disk binary state after a restart; failing closed"
+		rollback(tx)
+	}
 }
 
 // osExit is a package variable, not a direct os.Exit call, so tests can
@@ -791,6 +950,7 @@ func (w *Worker) heartbeatLoop() {
 	for {
 		w.sendHeartbeat()
 		go w.retryPendingUpdateReport()
+		go w.retryPendingJobReports()
 		select {
 		case <-w.stopCh:
 			return
@@ -1133,14 +1293,162 @@ func addJobResultMetadata(reqBody map[string]interface{}, meta jobResultMetadata
 	}
 }
 
+var jobUpdateBackoff = []time.Duration{0, 500 * time.Millisecond, time.Second}
+
+// terminalJobStatuses are the job statuses worth durably retrying: once
+// the coordinator accepts one of these, its view of the job is final and
+// nothing will ever report it again on its own. Mirrors
+// terminalUpdateStatuses for update-transaction reports.
+var terminalJobStatuses = map[string]bool{
+	string(models.StatusCompleted): true,
+	string(models.StatusFailed):    true,
+	string(models.StatusCancelled): true,
+}
+
+func pendingJobReportDir() string {
+	return filepath.Join(getWorkerDataDir(), "pending_job_reports")
+}
+
+type pendingJobReport struct {
+	JobID string                 `json:"job_id"`
+	Body  map[string]interface{} `json:"body"`
+}
+
+// postJobUpdate reports job status/results to the coordinator. A lost
+// mid-job progress report is harmless - the next one supersedes it - but
+// losing the single terminal report (completed/failed/cancelled) used to
+// mean the worker moved on believing the job was done while the
+// coordinator's record stayed stuck "running" forever, with nothing else
+// ever going to correct it. This now checks the response, retries a
+// bounded number of times with a short backoff, and - for a terminal
+// status specifically - persists an unacknowledged report to disk so
+// retryPendingJobReports (called from the ordinary heartbeat loop) keeps
+// retrying it after process restarts too, exactly mirroring reportUpdate's
+// already-hardened pattern for update-transaction reports.
 func (w *Worker) postJobUpdate(jobID string, reqBody map[string]interface{}) {
-	body, _ := json.Marshal(reqBody)
-	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/jobs/%s", w.CoordinatorURL, jobID), bytes.NewReader(body))
+	rep := pendingJobReport{JobID: jobID, Body: reqBody}
+
+	acked := false
+	for _, delay := range jobUpdateBackoff {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		if w.sendJobUpdateOnce(rep) {
+			acked = true
+			break
+		}
+	}
+
+	if acked {
+		w.clearPendingJobReportIfMatches(jobID)
+		return
+	}
+
+	if isTerminalJobReport(reqBody) {
+		log.Printf("[Job] Could not deliver terminal report for %s after retries; will keep retrying from the heartbeat loop", jobID)
+		if err := writePendingJobReport(rep); err != nil {
+			log.Printf("[Job] Could not persist pending report for later retry: %v", err)
+		}
+	}
+}
+
+func isTerminalJobReport(reqBody map[string]interface{}) bool {
+	status, ok := reqBody["status"]
+	if !ok {
+		return false
+	}
+	return terminalJobStatuses[fmt.Sprint(status)]
+}
+
+// sendJobUpdateOnce makes exactly one attempt and reports whether the
+// coordinator acknowledged it (2xx). A 404 (job deleted/coordinator
+// reset) or 409 (job already in a terminal state, or an attempt-ID
+// mismatch after a coordinator reset) are both treated as acknowledged
+// for retry purposes: the coordinator's state has already moved on
+// without this report, so there is nothing left to deliver it to -
+// mirroring the update-report path's existing 404-as-superseded
+// convention.
+func (w *Worker) sendJobUpdateOnce(rep pendingJobReport) bool {
+	body, err := json.Marshal(rep.Body)
+	if err != nil {
+		return false
+	}
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/api/jobs/%s", w.CoordinatorURL, rep.JobID), bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+w.Token)
 	resp, err := w.Client.Do(req)
-	if err == nil {
-		resp.Body.Close()
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusConflict {
+		return true
+	}
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func writePendingJobReport(rep pendingJobReport) error {
+	dir := pendingJobReportDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(rep)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, rep.JobID+"_"+generateRandomID()+".json")
+	return os.WriteFile(path, b, 0600)
+}
+
+func (w *Worker) clearPendingJobReportIfMatches(jobID string) {
+	dir := pendingJobReportDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), jobID+"_") {
+			os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
+}
+
+// retryPendingJobReports redelivers any terminal job reports that failed
+// to reach the coordinator even after postJobUpdate's own immediate
+// retries, including ones persisted before a crash/restart. Uses its own
+// mutex (not reportDrainMu) so job-report and update-report draining never
+// contend with each other on the same heartbeat tick.
+func (w *Worker) retryPendingJobReports() {
+	if !w.jobReportDrainMu.TryLock() {
+		return
+	}
+	defer w.jobReportDrainMu.Unlock()
+
+	dir := pendingJobReportDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rep pendingJobReport
+		if err := json.Unmarshal(b, &rep); err == nil {
+			if w.sendJobUpdateOnce(rep) {
+				os.Remove(path)
+			}
+		} else {
+			os.Remove(path)
+		}
 	}
 }
 

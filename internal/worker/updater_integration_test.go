@@ -197,9 +197,22 @@ func TestRollbackConcurrencyRace(t *testing.T) {
 	}
 	t.Cleanup(func() { safeReplace = originalReplace })
 
-	originalStealWait := stealWaitDuration
-	stealWaitDuration = 10 * time.Millisecond
-	t.Cleanup(func() { stealWaitDuration = originalStealWait })
+	// The lease must comfortably outlast safeReplace's simulated 200ms
+	// slow operation, so the second actor genuinely waits for the live
+	// first actor instead of racing to steal mid-operation - this is the
+	// exact property Finding B's fix adds. claimLeaseInterval must be
+	// short enough that at least one refresh lands inside that window.
+	originalLeaseInterval := claimLeaseInterval
+	claimLeaseInterval = 20 * time.Millisecond
+	t.Cleanup(func() { claimLeaseInterval = originalLeaseInterval })
+
+	originalLeaseStale := claimLeaseStaleAfter
+	claimLeaseStaleAfter = 500 * time.Millisecond
+	t.Cleanup(func() { claimLeaseStaleAfter = originalLeaseStale })
+
+	originalStealPoll := stealPollInterval
+	stealPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { stealPollInterval = originalStealPoll })
 
 	originalVerifyPoll := verifyPollInterval
 	verifyPollInterval = 10 * time.Millisecond

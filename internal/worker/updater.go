@@ -144,16 +144,67 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func processIsRunning(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
+// swapState is what inspectSwapState determines about the actual on-disk
+// binaries after a crash/restart with a persisted APPLYING transaction. It
+// is derived from file hashes, never from the transaction label alone,
+// because a crash can land at any point inside safeReplace.
+type swapState int
+
+const (
+	// swapAmbiguous: no combination of hashes proves what state the
+	// binaries are actually in. Never guess; fail closed via rollback().
+	swapAmbiguous swapState = iota
+	// swapNotStarted: OldBinaryPath still holds the pre-update binary and
+	// the staged candidate is still present and valid - the swap can be
+	// safely retried from scratch.
+	swapNotStarted
+	// swapAlreadyApplied: OldBinaryPath already holds the new binary -
+	// the rename succeeded before the crash. Whatever process is running
+	// this code IS the candidate, by construction.
+	swapAlreadyApplied
+	// swapInterruptedRestorable: OldBinaryPath is missing (the brief
+	// window inside safeReplace between moving the original aside and
+	// renaming the new one in) but the moved-aside original
+	// (OldBinaryPath+".replaced") is present and its hash matches the
+	// known-good pre-update binary - it can be renamed straight back.
+	swapInterruptedRestorable
+)
+
+// inspectSwapState determines swapState by hashing the actual files on
+// disk. It never trusts the persisted CurrentState label by itself, since
+// that only records the *intent* at the last successful writeTx call, not
+// what safeReplace actually completed before a crash.
+func inspectSwapState(tx *UpdateTransaction) swapState {
+	dest := tx.OldBinaryPath
+	replaced := dest + ".replaced"
+
+	if destHash, err := fileSHA256(dest); err == nil {
+		if tx.ExpectedSHA256 != "" && destHash == tx.ExpectedSHA256 {
+			return swapAlreadyApplied
+		}
+		if tx.OldSHA256 != "" && destHash == tx.OldSHA256 {
+			if _, err := fileSHA256(tx.NewBinaryPath); err == nil {
+				return swapNotStarted
+			}
+			// Old binary is intact but we can no longer prove the staged
+			// candidate is still valid (missing or corrupted) - retrying
+			// the swap from here would replace a known-good binary with
+			// an unverified one, so this is not safe to treat as
+			// not-started.
+			return swapAmbiguous
+		}
+		// dest exists but matches neither known hash: corruption or an
+		// unexpected file. Do not guess which side of the swap it is.
+		return swapAmbiguous
 	}
-	// Signal 0 is safe on Unix. On Windows, FindProcess always succeeds, we can test it by just waiting slightly.
-	// But actually, we don't need a perfectly robust check, just polling or waiting enough time.
-	// We will wait up to 10 seconds.
-	_ = p
-	return false // Simplified for cross-platform, we'll just wait
+
+	if replacedHash, err := fileSHA256(replaced); err == nil {
+		if tx.OldSHA256 != "" && replacedHash == tx.OldSHA256 {
+			return swapInterruptedRestorable
+		}
+	}
+
+	return swapAmbiguous
 }
 
 func RunUpdater() {
@@ -315,9 +366,99 @@ func generateRandomID() string {
 	return hex.EncodeToString(b)
 }
 
-var stealWaitDuration = 10 * time.Second
 var verifyWaitDuration = 30 * time.Second
 var verifyPollInterval = 2 * time.Second
+
+// claimLeaseInterval/claimLeaseStaleAfter replace a bare elapsed-time steal
+// rule with a real lease: whoever holds a Phase 1/Phase 2 claim refreshes
+// a companion ".lease" file every claimLeaseInterval while actively
+// working it. A second actor only treats the claim as abandoned (safe to
+// steal) once the lease has gone stale for claimLeaseStaleAfter - not
+// merely because some fixed short timer elapsed. claimLeaseStaleAfter is
+// deliberately generous: it must outlast a real (not test-shortened)
+// binary swap on the slowest hardware in the fleet, including AV/file-
+// scanning delays on a LocalSystem-context Windows service, a factor this
+// project has independently confirmed is real.
+var claimLeaseInterval = 2 * time.Second
+var claimLeaseStaleAfter = 45 * time.Second
+
+// stealPollInterval is how often a waiting actor rechecks a live claim's
+// lease freshness (not a wait-then-steal timer - it only ever leads to a
+// steal once claimIsLive reports false).
+var stealPollInterval = 2 * time.Second
+
+func leasePath(claimPath string) string {
+	return claimPath + ".lease"
+}
+
+// startLeaseKeeper begins refreshing claimPath's lease file every
+// claimLeaseInterval and returns a function that stops the refresh and
+// removes the lease file. The lease is a file separate from the claim
+// itself: for Phase 1, the "claim" file IS the backup binary being
+// restored, so lease metadata cannot be written into it without
+// corrupting the payload safeReplace is about to consume.
+func startLeaseKeeper(claimPath string) (stop func()) {
+	refresh := func() {
+		_ = os.WriteFile(leasePath(claimPath), []byte(fmt.Sprintf(`{"pid":%d}`, os.Getpid())), 0600)
+	}
+	refresh()
+	// Read claimLeaseInterval once here, synchronously in the caller's own
+	// goroutine, rather than inside the background goroutine below: the
+	// var is a test-overridable package variable, and reading it from the
+	// background goroutine would otherwise still be racy with a later
+	// test's override even after this goroutine is asked to stop, unless
+	// stop() is also made to wait for actual exit (which it does, below).
+	interval := claimLeaseInterval
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				refresh()
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		// Wait for the goroutine to actually have returned before this
+		// call returns, so no lease-keeper goroutine can ever outlive its
+		// caller - not merely "asked to stop soon".
+		<-exited
+		os.Remove(leasePath(claimPath))
+	}
+}
+
+// claimIsLive reports whether claimPath's lease was refreshed recently
+// enough to trust its owner is still actively working rather than having
+// crashed mid-operation. A missing lease - the owner crashed before ever
+// writing one, or it was already cleaned up - is never live.
+func claimIsLive(claimPath string) bool {
+	info, err := os.Stat(leasePath(claimPath))
+	if err != nil {
+		return false
+	}
+	return time.Since(info.ModTime()) <= claimLeaseStaleAfter
+}
+
+// nonLeaseClaims lists claim files matching pattern, excluding their
+// companion .lease files (which would otherwise also match a "*"
+// glob on the claim naming scheme).
+func nonLeaseClaims(pattern string) []string {
+	all, _ := filepath.Glob(pattern)
+	out := make([]string, 0, len(all))
+	for _, p := range all {
+		if !strings.HasSuffix(p, ".lease") {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 func rollback(tx *UpdateTransaction) {
 	localTx, err := readTx()
@@ -344,7 +485,7 @@ func rollback(tx *UpdateTransaction) {
 			hasBase = true
 		}
 
-		existingClaims, _ := filepath.Glob(t1Base + ".claim.*")
+		existingClaims := nonLeaseClaims(t1Base + ".claim.*")
 
 		if !hasBase && len(existingClaims) == 0 {
 			phase1Done = true
@@ -359,15 +500,22 @@ func rollback(tx *UpdateTransaction) {
 				claimed = true
 			}
 		} else if len(existingClaims) > 0 {
-			log.Printf("[Update] Phase 1 token claimed by another actor. Waiting to steal...")
-			time.Sleep(stealWaitDuration)
+			if claimIsLive(existingClaims[0]) {
+				log.Printf("[Update] Phase 1 token held by a live actor; waiting...")
+				time.Sleep(stealPollInterval)
+				continue
+			}
+			log.Printf("[Update] Phase 1 token's lease is stale; treating owner as crashed and stealing...")
 			if err := os.Rename(existingClaims[0], myClaim); err == nil {
 				claimed = true
+				os.Remove(leasePath(existingClaims[0]))
 				log.Printf("[Update] Stole Phase 1 token.")
 			}
 		}
 
 		if claimed {
+			stopLease := startLeaseKeeper(myClaim)
+
 			// Prepare Phase 2 token BEFORE consuming Phase 1 token
 			os.WriteFile(t2Base+".pending", []byte{}, 0644)
 
@@ -376,7 +524,9 @@ func rollback(tx *UpdateTransaction) {
 			logWriteTxErr(localTx, "ROLLING_BACK")
 
 			// Consume Phase 1 token
-			if err := safeReplace(myClaim, localTx.OldBinaryPath); err != nil {
+			err := safeReplace(myClaim, localTx.OldBinaryPath)
+			stopLease()
+			if err != nil {
 				if os.IsNotExist(err) {
 					log.Printf("[Update] Fenced out of Phase 1! Retrying discovery.")
 					continue
@@ -403,6 +553,18 @@ func rollback(tx *UpdateTransaction) {
 			hasConsumed = true
 		}
 
+		// restartLeasePath guards every Start() call in this phase - both
+		// the first attempt below and any timeout-triggered retry - so
+		// that a second actor whose own verification poll happens to
+		// time out while the first actor's Start() is still genuinely in
+		// flight (e.g. a slow service start) waits instead of piling on
+		// a duplicate restart. Without this, TestRollbackConcurrencyRace
+		// reproduces exactly that: two concurrent rollback() calls each
+		// independently retrying Start() the moment their own poll
+		// window elapses, with no way to tell "the owner crashed" apart
+		// from "the owner is just slow."
+		restartLeasePath := t2Base + ".starting"
+
 		if hasConsumed {
 			// Phase 2 Authorized. Move to Phase 3 Verification.
 			log.Printf("[Update] Restart authorized. Verifying previous worker health...")
@@ -424,17 +586,25 @@ func rollback(tx *UpdateTransaction) {
 				return
 			}
 
-			// Timeout expired and state is still unresolved.
-			// The previous actor likely crashed before or during Start().
-			// Idempotently retry Start().
+			if claimIsLive(restartLeasePath) {
+				log.Printf("[Update] Verification timed out, but another actor is actively restarting; continuing to wait instead of retrying.")
+				continue
+			}
+
+			// Timeout expired, state is still unresolved, and no other
+			// actor is actively mid-restart. The previous actor likely
+			// crashed before or during Start(). Idempotently retry it.
 			log.Printf("[Update] Verification timed out. Retrying restart of previous worker...")
-			if err := GetLifecycle(localTx.LifecycleMode).Start(localTx); err != nil {
+			stopRestartLease := startLeaseKeeper(restartLeasePath)
+			startErr := GetLifecycle(localTx.LifecycleMode).Start(localTx)
+			stopRestartLease()
+			if startErr != nil {
 				localTx.CurrentState = "ROLLBACK_FAILED"
-				localTx.RollbackReason = localTx.RollbackReason + " | restart retry failed: " + err.Error()
+				localTx.RollbackReason = localTx.RollbackReason + " | restart retry failed: " + startErr.Error()
 				logWriteTxErr(localTx, "ROLLBACK_FAILED (restart)")
 				return
 			}
-			// Loop continues, we will wait another 30 seconds for verification.
+			// Loop continues, we will wait another verifyWaitDuration for verification.
 			continue
 		}
 
@@ -443,7 +613,7 @@ func rollback(tx *UpdateTransaction) {
 			hasPending = true
 		}
 
-		existingClaims, _ := filepath.Glob(t2Base + ".claim.*")
+		existingClaims := nonLeaseClaims(t2Base + ".claim.*")
 
 		if !hasPending && len(existingClaims) == 0 {
 			localTx.CurrentState = "ROLLBACK_FAILED"
@@ -460,17 +630,25 @@ func rollback(tx *UpdateTransaction) {
 				claimed = true
 			}
 		} else if len(existingClaims) > 0 {
-			log.Printf("[Update] Phase 2 token claimed by another actor. Waiting to steal...")
-			time.Sleep(stealWaitDuration)
+			if claimIsLive(existingClaims[0]) {
+				log.Printf("[Update] Phase 2 token held by a live actor; waiting...")
+				time.Sleep(stealPollInterval)
+				continue
+			}
+			log.Printf("[Update] Phase 2 token's lease is stale; stealing...")
 			if err := os.Rename(existingClaims[0], myClaim); err == nil {
 				claimed = true
+				os.Remove(leasePath(existingClaims[0]))
 				log.Printf("[Update] Stole Phase 2 token.")
 			}
 		}
 
 		if claimed {
+			stopLease := startLeaseKeeper(myClaim)
 			// Consume Phase 2 token
-			if err := os.Rename(myClaim, t2Base+".consumed"); err != nil {
+			err := os.Rename(myClaim, t2Base+".consumed")
+			stopLease()
+			if err != nil {
 				if os.IsNotExist(err) {
 					log.Printf("[Update] Fenced out of Phase 2! Retrying discovery.")
 					continue
@@ -481,13 +659,19 @@ func rollback(tx *UpdateTransaction) {
 				return
 			}
 
-			// Token consumed. Start the worker for the first time.
+			// Token consumed. Start the worker for the first time, under
+			// the same restart lease the Phase 3 retry path checks, so a
+			// concurrent actor never piles on a second Start() while
+			// this one is still genuinely in flight.
 			log.Printf("[Update] Restarting previous worker...")
-			if err := GetLifecycle(localTx.LifecycleMode).Start(localTx); err != nil {
+			stopRestartLease := startLeaseKeeper(restartLeasePath)
+			startErr := GetLifecycle(localTx.LifecycleMode).Start(localTx)
+			stopRestartLease()
+			if startErr != nil {
 				localTx.CurrentState = "ROLLBACK_FAILED"
-				localTx.RollbackReason = localTx.RollbackReason + " | restart of restored binary failed: " + err.Error()
+				localTx.RollbackReason = localTx.RollbackReason + " | restart of restored binary failed: " + startErr.Error()
 				logWriteTxErr(localTx, "ROLLBACK_FAILED (restart)")
-				log.Printf("[Update] Rollback FAILED to restart the previous worker: %v", err)
+				log.Printf("[Update] Rollback FAILED to restart the previous worker: %v", startErr)
 				return
 			}
 			// Loop continues, which will discover `.consumed` and enter Phase 3 verification.

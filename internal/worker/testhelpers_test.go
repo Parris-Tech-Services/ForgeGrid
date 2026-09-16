@@ -1,6 +1,9 @@
 package worker
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 // setSandboxedDataDir points every home/app-data environment variable
 // getWorkerDataDir() might consult - XDG_DATA_HOME on POSIX,
@@ -49,4 +52,34 @@ func useFakeLifecycle(t *testing.T, startErr error) {
 		return &fakeLifecycle{mode: mode, startFn: func(*UpdateTransaction) error { return startErr }}
 	}
 	t.Cleanup(func() { GetLifecycle = original })
+}
+
+// useFakeLifecycleCounting is useFakeLifecycle plus a call counter, for
+// tests that need to assert exactly how many times Start() was invoked
+// (e.g. proving a concurrency fix stopped a duplicate restart).
+func useFakeLifecycleCounting(t *testing.T, calls *int, startErr error) {
+	t.Helper()
+	original := GetLifecycle
+	GetLifecycle = func(mode string) Lifecycle {
+		return &fakeLifecycle{mode: mode, startFn: func(*UpdateTransaction) error {
+			*calls++
+			return startErr
+		}}
+	}
+	t.Cleanup(func() { GetLifecycle = original })
+}
+
+// writeAndHash writes data to path and returns its hex SHA-256, for tests
+// that need to construct a transaction whose OldSHA256/ExpectedSHA256
+// matches a specific on-disk file.
+func writeAndHash(t *testing.T, path string, data []byte) string {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0755); err != nil {
+		t.Fatalf("writeAndHash: %v", err)
+	}
+	h, err := fileSHA256(path)
+	if err != nil {
+		t.Fatalf("writeAndHash: %v", err)
+	}
+	return h
 }
