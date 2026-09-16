@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"forgegrid/internal/localllm"
 	"forgegrid/internal/models"
 	"forgegrid/internal/network"
 	"forgegrid/internal/store"
@@ -26,6 +28,7 @@ type Coordinator struct {
 	AdminToken       string
 	Listener         net.Listener
 	MessagingGateway MessagingGateway
+	LocalLLM         *localllm.Client
 }
 
 func getOutboundIP() string {
@@ -95,6 +98,40 @@ func (c *Coordinator) Start(port string) error {
 		// If err != nil, c.MessagingGateway remains nil (Messaging unavailable)
 	}
 
+	llmCfg := localllm.DefaultConfig()
+	if c.Store.CoordinatorCfg.LLM.Enabled {
+		llmCfg.Enabled = true
+	}
+	if c.Store.CoordinatorCfg.LLM.Host != "" {
+		port := c.Store.CoordinatorCfg.LLM.Port
+		if port == 0 {
+			port = 11435
+		}
+		llmCfg.GatewayURL = fmt.Sprintf("http://%s:%d", c.Store.CoordinatorCfg.LLM.Host, port)
+	}
+	if c.Store.CoordinatorCfg.LLM.TimeoutSeconds > 0 {
+		llmCfg.RequestTimeout = time.Duration(c.Store.CoordinatorCfg.LLM.TimeoutSeconds) * time.Second
+	}
+	llmCfg.AdvisoryOnly = c.Store.CoordinatorCfg.LLM.AdvisoryOnly
+
+	// Runtime precedence: FORGEGRID_LLM_API_KEY env var, then llm-api-key.txt
+	if envKey := os.Getenv("FORGEGRID_LLM_API_KEY"); envKey != "" {
+		llmCfg.APIKey = string(bytes.TrimSpace([]byte(envKey)))
+	} else if c.Store.CoordinatorCfg.LLM.APICredentialID == "llm-api-key.txt" {
+		keyPath := filepath.Join(c.Store.Dir(), "llm-api-key.txt")
+		if info, err := os.Stat(keyPath); err == nil && info.Mode().Perm()&0077 != 0 {
+			c.Store.ProjectLibrary.LastError = "LLM API Key file must be accessible only to owner (0600)"
+		} else if b, err := os.ReadFile(keyPath); err == nil {
+			llmCfg.APIKey = string(bytes.TrimSpace(b))
+		}
+	}
+
+	if llmCfg.Enabled && llmCfg.APIKey == "" {
+		c.Store.ProjectLibrary.LastError = "local_llm enabled but missing FORGEGRID_LLM_API_KEY or llm-api-key.txt"
+	}
+
+	c.LocalLLM = localllm.NewClient(llmCfg, nil)
+
 	adminAuth := func(next http.HandlerFunc) http.HandlerFunc { return c.requireAdmin(next) }
 
 	mux.HandleFunc("/api/coordinator/start", adminAuth(c.handleStart))
@@ -112,6 +149,9 @@ func (c *Coordinator) Start(port string) error {
 	mux.HandleFunc("/api/dashboard/messaging/repair", adminAuth(c.handleMessagingRepair))
 	mux.HandleFunc("/api/dashboard/messages", adminAuth(c.handleMessages))
 	mux.HandleFunc("/api/dashboard/messages/", adminAuth(c.handleMessageDeliveryOrAck))
+	mux.HandleFunc("/api/dashboard/llm/status", adminAuth(c.handleLLMStatus))
+
+	mux.HandleFunc("/api/capabilities/llm/generate", adminAuth(c.handleLLMGenerate))
 
 	mux.HandleFunc("/api/workers/pair", c.handlePair)
 	mux.HandleFunc("/api/workers/heartbeat", c.handleHeartbeat)
