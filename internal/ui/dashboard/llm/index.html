@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DadLAN Qwen Chat</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui,sans-serif}body{margin:0;background:#10131a;color:#eef2f7;display:flex;justify-content:center}main{width:min(900px,100%);min-height:100vh;display:flex;flex-direction:column;padding:20px;box-sizing:border-box}header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #303744;padding-bottom:14px}h1{font-size:1.25rem;margin:0}.status{font-size:.85rem;color:#9fb0c4}.status.ok{color:#66d49a}.status.bad{color:#ff9b9b}#messages{flex:1;overflow:auto;padding:20px 0}.message{max-width:78%;padding:12px 15px;border-radius:14px;margin:10px 0;white-space:pre-wrap;overflow-wrap:anywhere}.user{margin-left:auto;background:#285b9e}.assistant{background:#252c38}.error{background:#642f38}.composer{display:flex;gap:10px;border-top:1px solid #303744;padding-top:14px}textarea{flex:1;resize:vertical;min-height:54px;max-height:180px;background:#171c25;color:inherit;border:1px solid #465163;border-radius:10px;padding:12px;font:inherit}button{background:#397bc3;color:white;border:0;border-radius:9px;padding:0 16px;font:inherit;cursor:pointer}button.secondary{background:#303846}button:disabled{opacity:.5;cursor:default}pre{background:#11151c;padding:10px;border-radius:8px;overflow:auto;white-space:pre}.meta{font-size:.75rem;color:#aab5c4;margin-top:6px}
+</style></head>
+<body><main>
+<header><div><h1>DadLAN · Local Qwen</h1><div class="status" id="status">Ready · qwen3.5:4b</div></div><button class="secondary" id="clear">New conversation</button></header>
+<section id="messages" aria-live="polite"><div class="message assistant">Ask Qwen a question. This chat is advisory only; it cannot run commands or create ForgeGrid jobs.</div></section>
+<form class="composer" id="form"><textarea id="input" placeholder="Message Qwen…" aria-label="Message"></textarea><button id="send" type="submit">Send</button></form>
+</main>
+<script>
+
+const messagesEl=document.getElementById('messages'), input=document.getElementById('input'), send=document.getElementById('send'), statusEl=document.getElementById('status');
+let history=[]; let controller=null;
+const chatSystemPrompt='You are qwen3.5:4b running via Ollama on JParrisDesktop. JParrisDesktop is a Windows PC on Josh\'s DadLAN. AVANCE-WS7 is a Fedora Linux PC running the ForgeGrid coordinator. The user may access this chat from other DadLAN machines. Do not invent meanings for hostnames or machine labels. If you do not know a fact, say you do not know. You are advisory-only and cannot assume an action was executed merely because it was discussed. Chat only: never execute or create shell commands, filesystem changes, worker actions, or ForgeGrid jobs.';
+function esc(s){return s.replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]))}
+function markdown(s){let out=esc(s);out=out.replace(/```(?:[\w-]+)?\n?([\s\S]*?)```/g,(_,x)=>'<pre><code>'+x+'</code></pre>');return out.replace(/\n/g,'<br>')}
+function add(role,text,meta=''){const d=document.createElement('div');d.className='message '+role;d.innerHTML=markdown(text)+(meta?'<div class="meta">'+esc(meta)+'</div>':'');messagesEl.appendChild(d);messagesEl.scrollTop=messagesEl.scrollHeight;return d}
+function setStatus(t,ok=false){statusEl.textContent=t;statusEl.className='status '+(ok?'ok':'bad')}
+function backendLabel(s){return ({auth_error:'Authentication/configuration problem',schema_invalid:'Schema invalid',protocol_error:'Protocol error',timeout:'Gateway timeout',configuration_error:'Configuration problem',busy:'Service busy',unexpected_model:'Unexpected model',unavailable:'Qwen unavailable',capability_disabled:'Local Qwen disabled'})[s]||'Qwen unavailable'}
+document.getElementById('clear').onclick=()=>{history=[];messagesEl.innerHTML='';add('assistant','New conversation. Ask Qwen a question.')};
+input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();document.getElementById('form').requestSubmit()}});
+document.getElementById('form').onsubmit=async e=>{e.preventDefault();const text=input.value.trim();if(!text||controller)return;if(text.length>8000){setStatus('Message too long (8,000 character limit)');return}input.value='';history.push({role:'user',content:text});add('user',text);let context=history.slice(-12), prompt=context.map(m=>(m.role==='user'?'User':'Assistant')+': '+m.content).join('\n\n');if(prompt.length>24000)prompt=prompt.slice(-24000);
+controller=new AbortController();send.textContent='Stop';setStatus('Generating · qwen3.5:4b',true);const started=performance.now();
+try{const res=await fetch('/api/capabilities/llm/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({UserPrompt:prompt,SystemPrompt:chatSystemPrompt,TaskID:'browser-chat'}),signal:controller.signal});let data={};try{data=await res.json()}catch(_){throw Error('Malformed coordinator response')};const backendStatus=data.Status||data.status;if(!res.ok||backendStatus!=='generated'){const e=new Error(backendLabel(backendStatus));e.backendStatus=backendStatus;throw e};let answer=data.Content||data.content||'';if(!answer)throw Error('Empty model response');if(answer.length>64000)answer=answer.slice(0,64000)+'\n\n[Response truncated in browser]';history.push({role:'assistant',content:answer});add('assistant',answer,((performance.now()-started)/1000).toFixed(1)+'s');setStatus('Qwen online · qwen3.5:4b',true)}catch(err){if(err.name==='AbortError'){setStatus('Ready · generation stopped')}else{add('error',err.message||'LLM unavailable');setStatus(err.message||'Qwen unavailable')}}finally{controller=null;send.textContent='Send';send.disabled=false}};
+</script></body></html>
