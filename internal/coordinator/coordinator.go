@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"forgegrid/internal/chatstore"
 	"forgegrid/internal/localllm"
 	"forgegrid/internal/models"
 	"forgegrid/internal/network"
@@ -29,6 +30,7 @@ type Coordinator struct {
 	Listener         net.Listener
 	MessagingGateway MessagingGateway
 	LocalLLM         *localllm.Client
+	ChatHistory      *chatstore.Store
 }
 
 func getOutboundIP() string {
@@ -131,6 +133,11 @@ func (c *Coordinator) Start(port string) error {
 	}
 
 	c.LocalLLM = localllm.NewClient(llmCfg, nil)
+	chatHistory, err := chatstore.Open(filepath.Join(c.Store.Dir(), "llm-chat-history.json"))
+	if err != nil {
+		return fmt.Errorf("failed to initialize LLM chat history: %w", err)
+	}
+	c.ChatHistory = chatHistory
 
 	adminAuth := func(next http.HandlerFunc) http.HandlerFunc { return c.requireAdmin(next) }
 
@@ -152,6 +159,8 @@ func (c *Coordinator) Start(port string) error {
 	mux.HandleFunc("/api/dashboard/llm/status", adminAuth(c.handleLLMStatus))
 
 	mux.HandleFunc("/api/capabilities/llm/generate", adminAuth(c.handleLLMGenerate))
+	mux.HandleFunc("/api/llm/conversations", adminAuth(c.handleLLMConversations))
+	mux.HandleFunc("/api/llm/conversations/", adminAuth(c.handleLLMConversation))
 
 	mux.HandleFunc("/api/workers/pair", c.handlePair)
 	mux.HandleFunc("/api/workers/heartbeat", c.handleHeartbeat)
