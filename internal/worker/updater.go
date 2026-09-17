@@ -688,6 +688,14 @@ func rollback(tx *UpdateTransaction) {
 			if !acquired {
 				continue
 			}
+			// A waiter may have observed an unclaimed lease, then blocked on
+			// the in-process lease mutex while the prior owner completed and
+			// published the durable verification fence. Re-check after
+			// acquisition so a stale observation cannot cause a second Start().
+			if _, err := os.Stat(restartVerifiedPath); err == nil {
+				stopRestartLease()
+				return
+			}
 			startErr := GetLifecycle(localTx.LifecycleMode).Start(localTx)
 			if startErr != nil {
 				stopRestartLease()
@@ -760,6 +768,12 @@ func rollback(tx *UpdateTransaction) {
 			stopRestartLease, acquired := acquireRestartLease(restartLeasePath)
 			if !acquired {
 				continue
+			}
+			// Another actor may have completed while this caller waited for
+			// the lease mutex; honor the durable completion fence before Start().
+			if _, err := os.Stat(restartVerifiedPath); err == nil {
+				stopRestartLease()
+				return
 			}
 			startErr := GetLifecycle(localTx.LifecycleMode).Start(localTx)
 			if startErr != nil {
