@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"forgegrid/internal/chatstore"
@@ -27,6 +28,7 @@ type Coordinator struct {
 	Insecure         bool
 	Fingerprint      string
 	AdminToken       string
+	ChatToken        string
 	Listener         net.Listener
 	MessagingGateway MessagingGateway
 	LocalLLM         *localllm.Client
@@ -91,6 +93,11 @@ func (c *Coordinator) Start(port string) error {
 	adminToken := c.Store.CoordinatorCfg.AdminToken
 	c.AdminToken = adminToken
 	c.Store.Mu.Unlock()
+	chatToken, err := c.ensureChatLoginFile()
+	if err != nil {
+		return fmt.Errorf("failed to initialize chat login: %w", err)
+	}
+	c.ChatToken = chatToken
 
 	if c.MessagingGateway == nil {
 		gw, err := NewLiveMessagingGateway()
@@ -159,8 +166,9 @@ func (c *Coordinator) Start(port string) error {
 	mux.HandleFunc("/api/dashboard/llm/status", adminAuth(c.handleLLMStatus))
 
 	mux.HandleFunc("/api/capabilities/llm/generate", adminAuth(c.handleLLMGenerate))
-	mux.HandleFunc("/api/llm/conversations", adminAuth(c.handleLLMConversations))
-	mux.HandleFunc("/api/llm/conversations/", adminAuth(c.handleLLMConversation))
+	chatAuth := func(next http.HandlerFunc) http.HandlerFunc { return c.requireChat(next) }
+	mux.HandleFunc("/api/llm/conversations", chatAuth(c.handleLLMConversations))
+	mux.HandleFunc("/api/llm/conversations/", chatAuth(c.handleLLMConversation))
 
 	mux.HandleFunc("/api/workers/pair", c.handlePair)
 	mux.HandleFunc("/api/workers/heartbeat", c.handleHeartbeat)
@@ -184,6 +192,9 @@ func (c *Coordinator) Start(port string) error {
 		return fmt.Errorf("failed to prepare dashboard filesystem: %w", err)
 	}
 	dashboardHandler := http.FileServer(http.FS(dashboardFS))
+	mux.HandleFunc("/llm/", chatAuth(func(w http.ResponseWriter, r *http.Request) {
+		dashboardHandler.ServeHTTP(w, r)
+	}))
 	mux.Handle("/", http.HandlerFunc(adminAuth(func(w http.ResponseWriter, r *http.Request) {
 		dashboardHandler.ServeHTTP(w, r)
 	})))
@@ -273,6 +284,36 @@ func (c *Coordinator) writeDashboardLoginFile(uiURL, adminToken string) (string,
 	return path, nil
 }
 
+func (c *Coordinator) ensureChatLoginFile() (string, error) {
+	path := filepath.Join(c.Store.Dir(), "chat-login.txt")
+	if b, err := os.ReadFile(path); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(line, "Password: ") {
+				password := strings.TrimSpace(strings.TrimPrefix(line, "Password: "))
+				if password != "" {
+					return password, nil
+				}
+			}
+		}
+		return "", fmt.Errorf("chat login file is malformed")
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	password := hex.EncodeToString(b)
+	body := fmt.Sprintf("ForgeGrid Chat Login\n\nUsername: chat\nPassword: %s\n\nThis account can access only the Qwen chat. Keep this file private.\n", password)
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		if os.IsExist(err) {
+			return c.ensureChatLoginFile()
+		}
+		return "", err
+	}
+	return password, nil
+}
+
 func (c *Coordinator) printDashboardLogin(addr, uiURL, adminToken, loginPath string, loginErr error) {
 	fmt.Println()
 	fmt.Println("========================================")
@@ -281,7 +322,7 @@ func (c *Coordinator) printDashboardLogin(addr, uiURL, adminToken, loginPath str
 	fmt.Printf(" Coordinator: %s (LAN IP: %s)\n", addr, c.IP)
 	fmt.Printf(" URL:         %s\n", uiURL)
 	fmt.Println(" Username:    admin")
-	fmt.Printf(" Password:    %s\n", adminToken)
+	fmt.Println(" Password:    stored in the login file")
 	if !c.Insecure {
 		fmt.Printf(" TLS FP:      %s\n", c.Fingerprint)
 	}

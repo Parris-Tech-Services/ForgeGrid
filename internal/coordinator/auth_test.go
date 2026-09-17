@@ -126,3 +126,26 @@ func TestAdminAuthSetsAndAcceptsBrowserCookie(t *testing.T) {
 		t.Fatalf("cookie status = %d", next.Code)
 	}
 }
+
+func TestChatAuthCannotReachAdminRoutes(t *testing.T) {
+	c := testCoordinator(t)
+	c.ChatToken = "chat-token"
+	chatHandler := c.requireChat(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	adminHandler := c.requireAdmin(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+
+	chatReq := httptest.NewRequest(http.MethodGet, "/api/llm/conversations", nil)
+	chatReq.SetBasicAuth("chat", "chat-token")
+	chatResp := httptest.NewRecorder()
+	chatHandler(chatResp, chatReq)
+	if chatResp.Code != http.StatusNoContent {
+		t.Fatalf("chat route status = %d, want 204", chatResp.Code)
+	}
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/api/workers", nil)
+	adminReq.SetBasicAuth("chat", "chat-token")
+	adminResp := httptest.NewRecorder()
+	adminHandler(adminResp, adminReq)
+	if adminResp.Code != http.StatusUnauthorized {
+		t.Fatalf("admin route accepted chat credentials with status %d", adminResp.Code)
+	}
+}
