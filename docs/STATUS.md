@@ -1,7 +1,7 @@
 # ForgeGrid — Status
 
-**Where we are:** Phase 1 (preserve and organise) in progress. Inventory done, `973c048` preserved (both the literal commit and Codex's rebase, under two distinct branch names — see below), hygiene branch created, untracked files archived, `.gitignore` hardened, `tools/action1_llm_host.py` consolidated, this file created. Mid-run correction applied: fleet is Laptop01–11 + JParrisDesktop (not 01–10), and the Codex review prompts were tightened to be genuinely read-only.
-**Next action:** Finish Phase 1 (CLAUDE.md, point NEXT_STEPS.md/Qwen status doc here, push this branch), then Phase 2 baseline validation (gofmt/vet/build/test/-race/cross-compile) on the three workstream branches.
+**Where we are:** Phase 1 done. Phase 2 (baseline validation) mostly done but **NOT green** — see `docs/HANDOFF-CURRENT.md` for the live blocker (a real, reproducible concurrency bug in `fix/self-update-reliability`, found by `go test -race`).
+**Next action:** Fix the `TestRollbackConcurrencyRace` root cause (atomic claim on the Phase 3 restart lease) on `fix/self-update-reliability`, per `docs/HANDOFF-CURRENT.md`. Do not proceed to Phase 3 integration until this branch is genuinely green under `-race`, run at least 10x.
 
 This is the single source of truth for the 2026-09-17 "bring everything forward" run
 (`~/forgegrid-handoff/2026-09-17/PROMPT.md`). Other status docs should link here
@@ -58,8 +58,28 @@ See `~/forgegrid-handoff/2026-09-17/PROMPT.md` section 4 (D1–D10) for the full
 - **D2 gap confirmed live:** the currently deployed GUI (`ee801e0`/`f6c9914`) sends `SystemPrompt` from the browser directly to the admin-only `/api/capabilities/llm/generate` route (`internal/ui/dashboard/llm/index.html:28`, `internal/coordinator/coordinator.go:154`). This means today's chat UI requires the dashboard admin credential to use at all, and prompt assembly is not server-side. To fix in Phase 5 under a new `/api/llm/*` route family per D2.
 - **`7efbbcf` is a dangling, unreferenced commit** (same title as `735fede`, an earlier/superseded attempt at the same LLM-gateway integration work). No branch contains it; `735fede` is the canonical, pushed version. No action needed, just resolves a contradiction from the source reports.
 - **Two other active AI agent processes on this machine** (`codex --yolo`, another Claude Code session) were confirmed at the start of this run to be idle at `~`, not touching ForgeGrid. Codex has since acted deliberately as an early collaborator: pushed `973c048`'s rebase as `ae0359f`/`backup/973c048-persistent-history`, and reported a D2 finding matching the one above. Per the amended process (`AMENDMENT.txt`), Codex's role going forward is a **read-only** reviewer invoked by Josh at each checkpoint against pinned SHAs — not an ongoing active collaborator making its own commits.
-- No `go test ./...` / `-race` run has completed yet on any of the three workstream branches (Phase 2, next).
 - **Resolved:** an external review caught that `backup/973c048-persistent-history` no longer pointed at the literal `973c048` commit the plan's checkpoint-review checklist expects — Codex had repointed that name to `ae0359f` (the rebase). Fixed without a force-push: the literal `973c048` snapshot is now separately preserved at `backup/973c048-persistent-history-original`. Both objects exist on the remote; see the branch map above for which name is which.
+- **A second amendment (received while Phase 2 was running) asked for the same fix via immutable tags instead of branch renaming, and asked that the earlier Codex session's changes be explicitly inventoried and verified.** Both are addressed:
+  - The branch-based fix above already satisfies the underlying requirement (both commits preserved, unambiguously named, no force-push, no data loss) — kept as-is per the amendment's own fallback ("if you've already handled this differently, write down exactly what you did"), rather than adding redundant tags pointing at the same two commits.
+  - Full inventory of what the earlier Codex session touched: exactly one push, to `backup/973c048-persistent-history` (later effectively split into the two branches above once the naming conflict was caught). Confirmed via `git log --all --since=2026-09-17` and a full remote branch re-listing that no other ref, commit, doc, or file was touched by it. Its tree-diff claim is verified, not just trusted: `ae0359f`'s only difference from `973c048` is the two roadmap docs that `f6c9914` (its actual parent) already had — no other content was added, changed or removed. Safe to bring forward in Phase 3 as-is.
+- No `go test ./...` / `-race` run had completed yet as of the previous update; see the Phase 2 results table below.
+
+## Phase 2 — baseline validation results
+
+All three workstream branches validated in temporary detached worktrees at their pinned SHAs (`fix/self-update-reliability` @ `33c767e`, `feature/qwen-assistant-v2` @ `f6c9914` — gofmt fix landed afterwards as `1c013ed`, `973c048`-as-now @ `ae0359f`).
+
+| Check | `33c767e` | `f6c9914` | `ae0359f` |
+|---|---|---|---|
+| `gofmt -l .` | clean | 2 files flagged, fixed on `feature/qwen-assistant-v2` in `1c013ed` (whitespace only) | same 2 files, inherited from `f6c9914`; fix carries forward once Phase 3 rebases this work onto the now-fixed branch |
+| `go vet ./...` | clean | clean | clean |
+| `go build ./...` | clean | clean | clean |
+| `git diff --check` | clean | clean | clean |
+| `go test ./...` | pass | pass, incl. `TestDownstream422` | pass, incl. `TestDownstream422` |
+| `go test -race ./...` | **FLAKY — see `docs/HANDOFF-CURRENT.md`** | pass | pass |
+| cross-compile (linux/amd64, windows/amd64, windows/386) | all 3 OK | all 3 OK | all 3 OK |
+| `govulncheck ./...` | no vulnerabilities | no vulnerabilities | no vulnerabilities |
+
+`TestDownstream422` (asked about explicitly in the source reports) exists in `internal/localllm/localllm_extra_test.go` and passes on both Qwen branches; it doesn't exist on the updater branch (different package).
 
 ## Backlog (explicitly out of scope this run — D10)
 
