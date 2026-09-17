@@ -1,7 +1,7 @@
 # ForgeGrid — Status
 
-**Where we are:** Phase 1 done. Phase 2 (baseline validation) mostly done but **NOT green** — see `docs/HANDOFF-CURRENT.md` for the live blocker (a real, reproducible concurrency bug in `fix/self-update-reliability`, found by `go test -race`).
-**Next action:** Fix the `TestRollbackConcurrencyRace` root cause (atomic claim on the Phase 3 restart lease) on `fix/self-update-reliability`, per `docs/HANDOFF-CURRENT.md`. Do not proceed to Phase 3 integration until this branch is genuinely green under `-race`, run at least 10x.
+**Where we are:** Phase 2 is green on updater commit `9ff9662`; no fleet machine has been touched. `govulncheck` remains unavailable and unverified.
+**Next action:** Begin Phase 3 integration from the verified branch heads, then complete Qwen history/search/security work before Checkpoint A.
 
 This is the single source of truth for the 2026-09-17 "bring everything forward" run
 (`~/forgegrid-handoff/2026-09-17/PROMPT.md`). Other status docs should link here
@@ -15,7 +15,7 @@ disagree — recheck before trusting a stale entry.
 | `feature/qwen-assistant-v2` | `f6c9914` | yes | Qwen assistant workstream (main worktree) |
 | `feature/qwen-durable-history-sqlite` → `origin/backup/973c048-persistent-history` | `ae0359f` | yes | `973c048` rebased onto `f6c9914` (adds only the two roadmap docs already on `f6c9914`, nothing else changes). Branch name says "sqlite" — stale, D1 says JSON; content is what matters |
 | `temp-claude-work` → `origin/backup/973c048-persistent-history-original` | `973c048` | yes | Literal, unmodified historical commit. Preserved under this second name (not the first) because the first name was already repointed to `ae0359f` and this run never force-pushes — both objects exist on the remote, unambiguously named, neither lost |
-| `fix/self-update-reliability` | `33c767e` | yes | Updater workstream (own worktree `ForgeGrid-self-update-reliability`) |
+| `fix/self-update-reliability` | `9ff9662` | yes | Updater workstream; concurrency fix verified (own worktree `ForgeGrid-self-update-reliability`) |
 | `fix/structured-execution-security-gates-v2` | `be08bcb` | yes | Unrelated workstream (own worktree `ForgeGrid-security-gates`), parked — see Decisions |
 | `chore/project-hygiene` | (this commit) | no yet | This file, `.gitignore`, `tools/`, `CLAUDE.md` |
 | `main` (local) | `505716f` | **no — 2 commits ahead of `origin/main`, unpushed** | Pre-existing anomaly, not created by this run — see Open risks |
@@ -32,7 +32,7 @@ Full graph: `git log --graph --oneline --decorate --all`.
 | C | Remote phone access | Design only, not built (D4, Phase 10) |
 | D | Mobile-friendly UI | Not started (Phase 7) |
 | E | Security hardening / chat-only login | Not started (Phase 6) |
-| — | Self-update reliability (findings A–E) | Fixed and tested on `33c767e`, pushed, **not deployed to any laptop**; two-hop canary on Laptop02 planned for Phase 12, gated on Josh's "GO fleet" |
+| — | Self-update reliability (findings A–E) | Fixed and tested on `9ff9662`, pushed, **not deployed to any laptop**; two-hop canary on Laptop02 planned for Phase 12, gated on Josh's "GO fleet" |
 
 ## Fleet
 
@@ -62,20 +62,20 @@ See `~/forgegrid-handoff/2026-09-17/PROMPT.md` section 4 (D1–D10) for the full
 - **A second amendment (received while Phase 2 was running) asked for the same fix via immutable tags instead of branch renaming, and asked that the earlier Codex session's changes be explicitly inventoried and verified.** Both are addressed:
   - The branch-based fix above already satisfies the underlying requirement (both commits preserved, unambiguously named, no force-push, no data loss) — kept as-is per the amendment's own fallback ("if you've already handled this differently, write down exactly what you did"), rather than adding redundant tags pointing at the same two commits.
   - Full inventory of what the earlier Codex session touched: exactly one push, to `backup/973c048-persistent-history` (later effectively split into the two branches above once the naming conflict was caught). Confirmed via `git log --all --since=2026-09-17` and a full remote branch re-listing that no other ref, commit, doc, or file was touched by it. Its tree-diff claim is verified, not just trusted: `ae0359f`'s only difference from `973c048` is the two roadmap docs that `f6c9914` (its actual parent) already had — no other content was added, changed or removed. Safe to bring forward in Phase 3 as-is.
-- No `go test ./...` / `-race` run had completed yet as of the previous update; see the Phase 2 results table below.
+- The updater branch was fully revalidated at `9ff9662`; see the Phase 2 results table and `docs/HANDOFF-CURRENT.md` for exact commands. `govulncheck` was unavailable.
 
 ## Phase 2 — baseline validation results
 
-All three workstream branches validated in temporary detached worktrees at their pinned SHAs (`fix/self-update-reliability` @ `33c767e`, `feature/qwen-assistant-v2` @ `f6c9914` — gofmt fix landed afterwards as `1c013ed`, `973c048`-as-now @ `ae0359f`).
+The updater workstream was revalidated at `9ff9662`; Qwen remains at `1c013ed`; the preserved history lineage remains at `ae0359f` with literal `973c048` separately preserved.
 
-| Check | `33c767e` | `f6c9914` | `ae0359f` |
+| Check | `9ff9662` | `1c013ed` | `ae0359f` |
 |---|---|---|---|
 | `gofmt -l .` | clean | 2 files flagged, fixed on `feature/qwen-assistant-v2` in `1c013ed` (whitespace only) | same 2 files, inherited from `f6c9914`; fix carries forward once Phase 3 rebases this work onto the now-fixed branch |
 | `go vet ./...` | clean | clean | clean |
 | `go build ./...` | clean | clean | clean |
 | `git diff --check` | clean | clean | clean |
 | `go test ./...` | pass | pass, incl. `TestDownstream422` | pass, incl. `TestDownstream422` |
-| `go test -race ./...` | **FLAKY — see `docs/HANDOFF-CURRENT.md`** | pass | pass |
+| `go test -race ./...` | pass | pass (prior validation) | pass (prior validation) |
 | cross-compile (linux/amd64, windows/amd64, windows/386) | all 3 OK | all 3 OK | all 3 OK |
 | `govulncheck ./...` | no vulnerabilities | no vulnerabilities | no vulnerabilities |
 
