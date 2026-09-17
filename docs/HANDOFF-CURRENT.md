@@ -1,6 +1,6 @@
 # ForgeGrid bring-forward run — current handoff
 
-Updated 2026-09-17 after the integrated updater fix and live coordinator restart. Claude has stopped; Codex is now the primary implementer. Eleven ForgeGrid workers are currently online; Laptop08 is offline/drained for the Defender investigation. No updater canary, credential rotation, destructive recovery, or fault injection was performed.
+Updated 2026-09-17 after the research-snippet fix and live browser verification. Claude has stopped; Codex is now the primary implementer. Twelve ForgeGrid workers are currently online; Laptop08 is drained for the Defender investigation. No updater canary, credential rotation, destructive recovery, or fault injection was performed.
 
 ## Current verified state
 
@@ -8,7 +8,7 @@ Updated 2026-09-17 after the integrated updater fix and live coordinator restart
 |---|---|---|---|
 | `/home/josh/dev/6 Laptops/ForgeGrid` | `feature/qwen-assistant-v2` | `1e84e77` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-hygiene` | `chore/project-hygiene` | `051ed35` | census update pending |
-| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `5017f41` | clean, pushed |
+| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `aa11e14` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-self-update-reliability` | `fix/self-update-reliability` | `9ff9662` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-security-gates` | `fix/structured-execution-security-gates-v2` | `be08bcb` | parked, pushed |
 
@@ -32,11 +32,11 @@ Evidence on `9ff9662`:
 - cross-compiles: `linux/amd64`, `windows/amd64`, `windows/386` pass with `CGO_ENABLED=0`
 - `govulncheck ./...`: unavailable in the environment, unverified
 
-The integrated restart-fence fix is committed and pushed to `origin/integration/next` as `5017f41`. It adds a post-acquisition durable verification-fence check at both rollback restart-lease paths. The focused race passed 50 repetitions, and the full normal/race/vet/build/cross-compile matrix passed. The live coordinator was rebuilt from `5017f41` and restarted; the updater fix is not deployed to DadLAN and no updater canary has run.
+The integrated restart-fence fix is committed and pushed to `origin/integration/next` as `5017f41`. The research-context fix is committed and pushed as `aa11e14`; it forwards untrusted SearXNG snippets when dynamic pages lack useful static text. The focused race passed 50 repetitions, the full normal/race/vet/build/cross-compile matrix passed, and the live browser verified casual no-search, automatic weather and forced research behavior. The live coordinator was rebuilt from `aa11e14` and restarted; the updater fix is not deployed to DadLAN and no updater canary has run.
 
 ## Integrated Qwen state
 
-The integrated branch contains the persistent JSON history/search, chat-only auth, SSRF-safe fetch boundary, bounded local SearXNG provider, server-side prompt/history assembly, explicit UI toggle and source display. Live API checks passed: casual chat returned zero sources, automatic weather returned three sources, forced web search returned three sources, rename/read/delete worked, and a conversation survived coordinator restart. Browser automation and mobile visual checks remain unverified because `agent-browser` is unavailable.
+The integrated branch contains the persistent JSON history/search, chat-only auth, SSRF-safe fetch boundary, bounded local SearXNG provider, server-side prompt/history assembly, explicit UI toggle and source display. Live API and browser checks passed: casual chat returned zero sources with Web Search off, automatic weather returned three sources and a useful forecast, forced research returned source-backed Go release evidence, rename/read/delete worked, and a conversation survived coordinator restart. Mobile visual checks remain unverified.
 
 ## Next action
 
