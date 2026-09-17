@@ -41,6 +41,8 @@ DadLAN is **Laptop01–11 plus JParrisDesktop**. Action1 most recently reported 
 
 The 12-worker smoke wave completed successfully: `job-5287aa067d9d3fbd9e1c7934eb954e4b`, `job-e6db274b1ad8091a3e66ace67f81556`, `job-64e924f811a7363a18777d89949c90d9`, `job-4ed6b7026e952f7ff3512716c2e1a5ba`, `job-b946431831e4949adf0337bb377725a3`, `job-c7d5f0834433600e1399569a51c1601e`, `job-a117345d9e54d2a9a35ab44c047f0ca5`, `job-9811dbee4ad71d434776fef40217b35f`, `job-11921afd33945843247931a2fd339bce`, `job-55e56509308b8befca6c0c1517e68207`, `job-38ba5b0934a291eadb58fb1eaeca5ca6`, and `job-8741a219af0e9e020d70d0d22817a0e4`. These prove liveness/execution, not full toolchain readiness.
 
+Performance tuning completed 2026-09-17: High Performance power plan and AC no-sleep were applied successfully to Laptop01, Laptop03, Laptop07, Laptop08, Laptop09, Laptop10, and Laptop11. Laptop03/07/08/09/10 were labeled for legacy compatibility scheduling; Laptop10 additionally has `compat:win386` and remains a one-job-at-a-time specialist. Laptop08 was measured at 100% CPU during the audit and needs a follow-up process/thermal investigation. ForgeGrid does not currently expose a per-worker concurrency setting; scheduler specialization remains label-based.
+
 ## Gates
 
 - **Checkpoint A** (after history + web search are live, before any laptop is touched): stop, list exact SHAs of every branch head / `integration/next` / deployed build, wait for Josh's Codex-reviewed go-ahead. Requires explicit **"GO fleet"** (and separately **"GO fault-test"**) before Phase 12/13.
