@@ -8,7 +8,7 @@ Updated 2026-09-17 after auth hardening and the SSRF-safe research boundary. Cla
 |---|---|---|---|
 | `/home/josh/dev/6 Laptops/ForgeGrid` | `feature/qwen-assistant-v2` | `bfa7942` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-hygiene` | `chore/project-hygiene` | `633d7f5` | clean, pushed |
-| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `04897b3` | clean, pushed |
+| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `f0e842a` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-self-update-reliability` | `fix/self-update-reliability` | `9ff9662` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-security-gates` | `fix/structured-execution-security-gates-v2` | `be08bcb` | parked, pushed |
 
@@ -36,7 +36,7 @@ The updater fix is committed and pushed to `origin/fix/self-update-reliability`.
 
 ## Integrated Qwen state
 
-The Qwen branch brings forward the persistent-history lineage through merge `338eacd`, adds hardened JSON persistence and search in `6d6e278`, fixes failed-append in-memory rollback in `1038713`, adds chat-only auth in `326af5c`, and adds the tested SSRF-safe fetch boundary in `bfa7942`. The integrated branch contains these at `04897b3`. Server-side prompt/history assembly and chat-only auth are present; research provider/UI wiring and mobile polish are not yet complete.
+The Qwen branch brings forward the persistent-history lineage through merge `338eacd`, adds hardened JSON persistence and search in `6d6e278`, fixes failed-append in-memory rollback in `1038713`, adds chat-only auth in `326af5c`, and adds the tested SSRF-safe fetch boundary in `bfa7942`. The integrated branch contains these at `f0e842a`. Server-side prompt/history assembly and chat-only auth are present; research provider/UI wiring and mobile polish are not yet complete.
 
 ## Next action
 
