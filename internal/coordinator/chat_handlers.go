@@ -3,6 +3,7 @@ package coordinator
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -22,6 +23,12 @@ type chatRenameRequest struct {
 type chatGenerateRequest struct {
 	UserPrompt string `json:"user_prompt"`
 	WebSearch  bool   `json:"web_search,omitempty"`
+}
+
+var currentInfoPrompt = regexp.MustCompile(`(?i)\b(weather|forecast|news|sports?|score|price|stock|today|tonight|tomorrow|latest|current|right now)\b`)
+
+func shouldResearchPrompt(prompt string) bool {
+	return currentInfoPrompt.MatchString(prompt)
 }
 
 func writeChatJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -120,7 +127,7 @@ func (c *Coordinator) handleLLMConversation(w http.ResponseWriter, r *http.Reque
 		}
 		var prompt strings.Builder
 		var sources []research.Source
-		if req.WebSearch && c.Research != nil {
+		if (req.WebSearch || shouldResearchPrompt(req.UserPrompt)) && c.Research != nil {
 			if found, err := c.Research.Research(r.Context(), req.UserPrompt); err == nil {
 				sources = found
 				if len(sources) > 0 {
