@@ -167,6 +167,16 @@ type Artifact struct {
 	PackageName   string `json:"package_name,omitempty"`
 }
 
+type LLMConfig struct {
+	Enabled         bool   `json:"enabled"`
+	AdvisoryOnly    bool   `json:"advisory_only"`
+	Host            string `json:"host"`
+	Port            int    `json:"port"`
+	Endpoint        string `json:"endpoint"`
+	TimeoutSeconds  int    `json:"timeout_seconds"`
+	APICredentialID string `json:"api_credential_id"`
+}
+
 type CoordinatorState struct {
 	Identity        string    `json:"identity"`
 	PairingCode     string    `json:"pairing_code"`
@@ -175,6 +185,7 @@ type CoordinatorState struct {
 	AdminToken      string    `json:"admin_token"`
 	CertPEM         []byte    `json:"cert_pem,omitempty"`
 	KeyPEM          []byte    `json:"key_pem,omitempty"`
+	LLM             LLMConfig `json:"llm,omitempty"`
 }
 
 type Project struct {

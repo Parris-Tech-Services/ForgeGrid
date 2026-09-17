@@ -1,5 +1,11 @@
 # ForgeGrid / DadLAN Fleet — Status and Remaining Work
 
+> **Superseded by `docs/STATUS.md`** (on `chore/project-hygiene` / `integration/next`,
+> merged into this branch once integration lands), now the single status doc for the
+> whole repo. Fleet is Laptop01–11 + JParrisDesktop, not 01–10 as this file may say
+> further down. Treat anything below that contradicts `STATUS.md` as stale (this file
+> was last updated 2026-09-09).
+
 _Last updated: 2026-09-09, branch `forgegrid-consolidation`, HEAD `e1297cf586ad` (code) /
 verify against `git log -1` for the true current HEAD — this file is updated at each
 milestone, not on every commit._
