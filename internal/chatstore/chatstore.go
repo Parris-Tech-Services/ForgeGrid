@@ -47,6 +47,12 @@ type Store struct {
 	conversations map[string]Conversation
 }
 
+const (
+	maxMessageBytes      = 64 * 1024
+	maxConversationBytes = 4 * 1024 * 1024
+	maxHistoryBytes      = 25 * 1024 * 1024
+)
+
 func Open(path string) (*Store, error) {
 	s := &Store{path: path, conversations: make(map[string]Conversation)}
 	b, err := os.ReadFile(path)
@@ -78,7 +84,31 @@ func (s *Store) saveLocked() error {
 	if err := os.WriteFile(tmp, b, 0600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	f, err := os.OpenFile(tmp, os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if _, err = os.Stat(s.path); err == nil {
+		_ = os.Remove(s.path + ".bak")
+		if err = os.Rename(s.path, s.path+".bak"); err != nil {
+			return err
+		}
+	}
+	if err = os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	if dir, openErr := os.Open(filepath.Dir(s.path)); openErr == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }
 
 func newID() string {
@@ -107,7 +137,7 @@ func (s *Store) List(query string) []Conversation {
 		if c.Deleted {
 			continue
 		}
-		if query != "" && !strings.Contains(strings.ToLower(c.Title), query) {
+		if query != "" && !strings.Contains(strings.ToLower(c.Title), query) && !conversationContains(c, query) {
 			continue
 		}
 		c.Messages = nil
@@ -115,6 +145,15 @@ func (s *Store) List(query string) []Conversation {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return out
+}
+
+func conversationContains(c Conversation, query string) bool {
+	for _, m := range c.Messages {
+		if strings.Contains(strings.ToLower(m.Content), query) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) Get(id string) (Conversation, bool) {
@@ -151,9 +190,7 @@ func (s *Store) Delete(id string) error {
 	if !ok || c.Deleted {
 		return os.ErrNotExist
 	}
-	c.Deleted = true
-	c.UpdatedAt = time.Now().UTC()
-	s.conversations[id] = c
+	delete(s.conversations, id)
 	return s.saveLocked()
 }
 
@@ -163,6 +200,14 @@ func (s *Store) Append(id string, messages ...Message) (Conversation, error) {
 	c, ok := s.conversations[id]
 	if !ok || c.Deleted {
 		return Conversation{}, os.ErrNotExist
+	}
+	for _, m := range messages {
+		if len(m.Content) > maxMessageBytes {
+			return Conversation{}, errors.New("message exceeds 64 KiB")
+		}
+	}
+	if len(c.Messages) > 0 && conversationJSONSize(c, messages) > maxConversationBytes {
+		return Conversation{}, errors.New("conversation exceeds 4 MiB")
 	}
 	for _, m := range messages {
 		m.ID = newID()
@@ -181,5 +226,14 @@ func (s *Store) Append(id string, messages ...Message) (Conversation, error) {
 	}
 	c.UpdatedAt = time.Now().UTC()
 	s.conversations[id] = c
+	if len(mustJSON(diskState{Conversations: s.conversations})) > maxHistoryBytes {
+		return Conversation{}, errors.New("history exceeds 25 MiB")
+	}
 	return c, s.saveLocked()
+}
+
+func mustJSON(v interface{}) []byte { b, _ := json.Marshal(v); return b }
+func conversationJSONSize(c Conversation, extra []Message) int {
+	c.Messages = append(append([]Message(nil), c.Messages...), extra...)
+	return len(mustJSON(c))
 }
