@@ -1,6 +1,6 @@
 # ForgeGrid bring-forward run — current handoff
 
-Updated 2026-09-17 after worker recovery. Claude has stopped; Codex is now the primary implementer. Eleven ForgeGrid workers are online after safe existing-service starts; Laptop11 has no installed worker binary/service. No updater, credential, destructive, or fault-injection action was performed.
+Updated 2026-09-17 after the integrated updater fix and live coordinator restart. Claude has stopped; Codex is now the primary implementer. Eleven ForgeGrid workers are currently online; Laptop08 is offline/drained for the Defender investigation. No updater canary, credential rotation, destructive recovery, or fault injection was performed.
 
 ## Current verified state
 
@@ -8,7 +8,7 @@ Updated 2026-09-17 after worker recovery. Claude has stopped; Codex is now the p
 |---|---|---|---|
 | `/home/josh/dev/6 Laptops/ForgeGrid` | `feature/qwen-assistant-v2` | `1e84e77` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-hygiene` | `chore/project-hygiene` | `051ed35` | census update pending |
-| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `4b7bed8` | clean, pushed |
+| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `5017f41` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-self-update-reliability` | `fix/self-update-reliability` | `9ff9662` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-security-gates` | `fix/structured-execution-security-gates-v2` | `be08bcb` | parked, pushed |
 
@@ -32,15 +32,15 @@ Evidence on `9ff9662`:
 - cross-compiles: `linux/amd64`, `windows/amd64`, `windows/386` pass with `CGO_ENABLED=0`
 - `govulncheck ./...`: unavailable in the environment, unverified
 
-The updater fix is committed and pushed to `origin/fix/self-update-reliability`. It is not deployed and no canary has run.
+The integrated restart-fence fix is committed and pushed to `origin/integration/next` as `5017f41`. It adds a post-acquisition durable verification-fence check at both rollback restart-lease paths. The focused race passed 50 repetitions, and the full normal/race/vet/build/cross-compile matrix passed. The live coordinator was rebuilt from `5017f41` and restarted; the updater fix is not deployed to DadLAN and no updater canary has run.
 
 ## Integrated Qwen state
 
-The Qwen branch brings forward the persistent-history lineage through merge `338eacd`, adds hardened JSON persistence and search in `6d6e278`, fixes failed-append in-memory rollback in `1038713`, adds chat-only auth in `326af5c`, adds the tested SSRF-safe fetch boundary in `bfa7942`, and adds the bounded fixed-local SearXNG provider in `fc0fcdc`. The integrated branch contains these at `a5685b2`. Server-side prompt/history, chat-only auth, and provider wiring are present; explicit UI toggle/source display, SearXNG deployment, and mobile polish are not yet complete.
+The integrated branch contains the persistent JSON history/search, chat-only auth, SSRF-safe fetch boundary, bounded local SearXNG provider, server-side prompt/history assembly, explicit UI toggle and source display. Live API checks passed: casual chat returned zero sources, automatic weather returned three sources, forced web search returned three sources, rename/read/delete worked, and a conversation survived coordinator restart. Browser automation and mobile visual checks remain unverified because `agent-browser` is unavailable.
 
 ## Next action
 
-Prepare a reviewed worker bootstrap for Laptop11, then add immutable-SHA distributed validation jobs; continue Phase 9 provider/UI wiring and Phase 7 mobile work on the Qwen branch, merge each completed branch head into `integration/next`, rerun the full suite and cross-compiles, and stop at Checkpoint A before updater/fault actions with exact immutable SHAs for independent review.
+Complete the capability/toolchain audit and browser/E2E evidence, finish Laptop08 diagnosis, and independently review the failed-then-completed Eleven-Realms dispatch evidence. The successful dispatch used Laptop04 after adding the Eleven-Realms repository to its existing worker allowlist; the AI task completed with `no changes` because the worker lacked valid OpenAI authentication, so the end-to-end mission acceptance is not yet proven.
 
 ## Hard boundaries
 

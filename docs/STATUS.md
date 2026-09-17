@@ -1,7 +1,7 @@
 # ForgeGrid — Status
 
-**Where we are:** The live coordinator has all 12 DadLAN workers online and ready. All workers now report ForgeGrid `0.8.3 / 77a07222a435`; all 12 completed a harmless built-in smoke job on 2026-09-17. Laptop10 remains the Windows/386 specialist.
-**Next action:** Complete the capability/toolchain audit and continue Qwen research UI/mobile/E2E work.
+**Where we are:** The live coordinator is running the integrated `integration/next` build at `5017f41` with SearXNG configured locally. Eleven workers are currently online after the coordinator restart; Laptop08 is offline/drained pending its Defender investigation. The preceding 11-worker smoke wave completed successfully, and all workers reported ForgeGrid `0.8.3 / 77a07222a435` before the restart. Laptop10 remains the Windows/386 specialist.
+**Next action:** Complete the capability/toolchain audit, resolve the remaining Qwen browser/E2E evidence gap, and independently review the real Eleven-Realms dispatch result before Checkpoint A.
 
 This is the single source of truth for the 2026-09-17 "bring everything forward" run
 (`~/forgegrid-handoff/2026-09-17/PROMPT.md`). Other status docs should link here
@@ -18,7 +18,7 @@ disagree — recheck before trusting a stale entry.
 | `fix/self-update-reliability` | `9ff9662` | yes | Updater workstream; concurrency fix verified (own worktree `ForgeGrid-self-update-reliability`) |
 | `fix/structured-execution-security-gates-v2` | `be08bcb` | yes | Unrelated workstream (own worktree `ForgeGrid-security-gates`), parked — see Decisions |
 | `chore/project-hygiene` | `633d7f5` | yes | This file, `.gitignore`, `tools/`, `CLAUDE.md` |
-| `integration/next` | `07bff11` | yes | Merged pre-fleet integration build |
+| `integration/next` | `5017f41` | yes | Integrated release candidate; updater restart-fence fix and live coordinator build |
 | `main` (local) | `505716f` | **no — 2 commits ahead of `origin/main`, unpushed** | Pre-existing anomaly, not created by this run — see Open risks |
 | `origin/main` | `03aa1ac` | — | Integration target |
 
@@ -29,7 +29,7 @@ Full graph: `git log --graph --oneline --decorate --all`.
 | Part | Item | Status |
 |---|---|---|
 | A | Persistent, searchable chat history | Integrated and tested — JSON store is mutexed, atomic/backed-up, searchable, hard-delete, and bounded; server-side prompt assembly is present. |
-| B | Opt-in web research | Fixed local SearXNG provider and safe fetch path implemented/tested; explicit UI toggle, source display and SearXNG deployment remain |
+| B | Opt-in web research | Local SearXNG provider, automatic current-info detection, explicit UI toggle and source display are implemented; live API weather and casual-chat checks pass. Browser automation remains unverified because `agent-browser` is unavailable. |
 | C | Remote phone access | Design only, not built (D4, Phase 10) |
 | D | Mobile-friendly UI | Not started (Phase 7) |
 | E | Security hardening / chat-only login | Chat-only login implemented and focused auth tests pass; broader request/logging/XSS coverage remains |
@@ -37,7 +37,7 @@ Full graph: `git log --graph --oneline --decorate --all`.
 
 ## Fleet
 
-DadLAN is **Laptop01–11 plus JParrisDesktop**. Action1 most recently reported 11 connected endpoints (Laptop01's Action1 connection may drift independently); the ForgeGrid coordinator reports all 12 workers online and ready. All 12 are on ForgeGrid `0.8.3 / 77a07222a435`, with Laptop10 on the matching Windows/386 artifact. Existing worker service startup settings were preserved; no fleet-wide autostart redesign was performed.
+DadLAN is **Laptop01–11 plus JParrisDesktop**. Action1 has 12 managed endpoints; the live ForgeGrid coordinator currently reports 11 online after restart, with Laptop08 offline/drained. The last verified worker wave reported ForgeGrid `0.8.3 / 77a07222a435`, with Laptop10 on the matching Windows/386 artifact. Laptop04 was safely repaired to allow the Eleven-Realms repository; its service remains Manual. No fleet-wide autostart redesign was performed.
 
 The 12-worker smoke wave completed successfully: `job-5287aa067d9d3fbd9e1c7934eb954e4b`, `job-e6db274b1ad8091a3e66ace67f81556`, `job-64e924f811a7363a18777d89949c90d9`, `job-4ed6b7026e952f7ff3512716c2e1a5ba`, `job-b946431831e4949adf0337bb377725a3`, `job-c7d5f0834433600e1399569a51c1601e`, `job-a117345d9e54d2a9a35ab44c047f0ca5`, `job-9811dbee4ad71d434776fef40217b35f`, `job-11921afd33945843247931a2fd339bce`, `job-55e56509308b8befca6c0c1517e68207`, `job-38ba5b0934a291eadb58fb1eaeca5ca6`, and `job-8741a219af0e9e020d70d0d22817a0e4`. These prove liveness/execution, not full toolchain readiness.
 
@@ -47,7 +47,7 @@ Follow-up evidence: Laptop08's top process was Windows Defender `MsMpEng`; real-
 
 ## Gates
 
-- **Checkpoint A** (after history + web search are live, before any laptop is touched): stop, list exact SHAs of every branch head / `integration/next` / deployed build, wait for Josh's Codex-reviewed go-ahead. Requires explicit **"GO fleet"** (and separately **"GO fault-test"**) before Phase 12/13.
+- **Checkpoint A** (after history + web search are live, before updater/fault actions): stop, list exact SHAs of every branch head / `integration/next` / deployed build, wait for independent review. Normal compute and reversible worker administration are authorized by Josh's broadened GO FLEET instruction; updater canary/fault actions remain separately gated.
 - **Checkpoint B** (PRs open): stop, wait for Josh to merge. Don't merge anything.
 - **Never**: fleet actions before GO fleet, Tailscale/VPN/port-forwarding setup, sudo without asking, force-push, push to `main`, deleting anything not created this run, printing/logging any secret file listed in `.gitignore`'s "Runtime data and secrets" block.
 
@@ -69,7 +69,7 @@ See `~/forgegrid-handoff/2026-09-17/PROMPT.md` section 4 (D1–D10) for the full
 - **A second amendment (received while Phase 2 was running) asked for the same fix via immutable tags instead of branch renaming, and asked that the earlier Codex session's changes be explicitly inventoried and verified.** Both are addressed:
   - The branch-based fix above already satisfies the underlying requirement (both commits preserved, unambiguously named, no force-push, no data loss) — kept as-is per the amendment's own fallback ("if you've already handled this differently, write down exactly what you did"), rather than adding redundant tags pointing at the same two commits.
   - Full inventory of what the earlier Codex session touched: exactly one push, to `backup/973c048-persistent-history` (later effectively split into the two branches above once the naming conflict was caught). Confirmed via `git log --all --since=2026-09-17` and a full remote branch re-listing that no other ref, commit, doc, or file was touched by it. Its tree-diff claim is verified, not just trusted: `ae0359f`'s only difference from `973c048` is the two roadmap docs that `f6c9914` (its actual parent) already had — no other content was added, changed or removed. Safe to bring forward in Phase 3 as-is.
-- The updater branch was fully revalidated at `9ff9662`; the integrated tip `07bff11` passed normal and race tests after the provider merge. Earlier integrated vet/build/format/diff-check/cross-compile evidence remains valid for unchanged code; rerun the complete matrix before Checkpoint A. `govulncheck` is unavailable in this environment and remains unverified.
+- The integrated branch was fully revalidated after the restart-fence fix at `5017f41`: normal tests, race tests, vet, build, format/diff checks, and Linux/Windows amd64/Windows 386 cross-builds passed. The focused rollback race passed 50 repetitions. `govulncheck` is unavailable in this environment and remains unverified.
 
 ## Phase 2 — baseline validation results
 
