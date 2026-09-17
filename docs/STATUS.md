@@ -43,6 +43,8 @@ The 12-worker smoke wave completed successfully: `job-5287aa067d9d3fbd9e1c7934eb
 
 Performance tuning completed 2026-09-17: High Performance power plan and AC no-sleep were applied successfully to Laptop01, Laptop03, Laptop07, Laptop08, Laptop09, Laptop10, and Laptop11. Laptop03/07/08/09/10 were labeled for legacy compatibility scheduling; Laptop10 additionally has `compat:win386` and remains a one-job-at-a-time specialist. Laptop08 was measured at 100% CPU during the audit and needs a follow-up process/thermal investigation. ForgeGrid does not currently expose a per-worker concurrency setting; scheduler specialization remains label-based.
 
+Follow-up evidence: Laptop08's top process was Windows Defender `MsMpEng`; real-time protection is enabled, tamper protection is enabled, idle-only scanning is enabled, and no exclusions or threats were reported. Its built-in smoke job took 7.96 seconds versus under 1.4 seconds for the other measured workers, so Laptop08 was placed in coordinator drain mode pending investigation. No Defender protection was disabled.
+
 ## Gates
 
 - **Checkpoint A** (after history + web search are live, before any laptop is touched): stop, list exact SHAs of every branch head / `integration/next` / deployed build, wait for Josh's Codex-reviewed go-ahead. Requires explicit **"GO fleet"** (and separately **"GO fault-test"**) before Phase 12/13.
