@@ -1,7 +1,7 @@
 # ForgeGrid — Status
 
-**Where we are:** The local coordinator is restored from integration SHA `4b7bed8`; eleven ForgeGrid workers are now online after safe existing-service starts. Laptop11 has no installed worker binary/service. No updater or destructive fleet action was performed.
-**Next action:** Prepare a reviewed worker bootstrap for Laptop11, then add immutable-SHA distributed validation jobs and continue Qwen research UI/mobile/E2E work.
+**Where we are:** The live coordinator has all 12 DadLAN workers online and ready. All workers now report ForgeGrid `0.8.3 / 77a07222a435`; all 12 completed a harmless built-in smoke job on 2026-09-17. Laptop10 remains the Windows/386 specialist.
+**Next action:** Complete the capability/toolchain audit and continue Qwen research UI/mobile/E2E work.
 
 This is the single source of truth for the 2026-09-17 "bring everything forward" run
 (`~/forgegrid-handoff/2026-09-17/PROMPT.md`). Other status docs should link here
@@ -37,9 +37,9 @@ Full graph: `git log --graph --oneline --decorate --all`.
 
 ## Fleet
 
-DadLAN is **Laptop01–11 plus JParrisDesktop** (corrected 2026-09-17). Action1 reports 12 managed endpoints and 11 connected. After safe existing-service recovery, the coordinator reports eleven online ForgeGrid workers: Laptop01–10 and JParrisDesktop; Laptop08 is now online and heartbeating. Laptop11's recovery action ended `Success`, but diagnostics proved it has no ForgeGrid binary or service and therefore no worker registration. No autostart policy was changed. Laptop02 remains excluded from updater deployment decisions.
+DadLAN is **Laptop01–11 plus JParrisDesktop**. Action1 most recently reported 11 connected endpoints (Laptop01's Action1 connection may drift independently); the ForgeGrid coordinator reports all 12 workers online and ready. All 12 are on ForgeGrid `0.8.3 / 77a07222a435`, with Laptop10 on the matching Windows/386 artifact. Existing worker service startup settings were preserved; no fleet-wide autostart redesign was performed.
 
-Six harmless built-in smoke jobs completed successfully: `job-1165064ce6a32f09376fc26d38f16156`, `job-4bb17061b2ee0d5b5c1c3095750df0f1`, `job-430b8437605e07c71dcc12a94769a3cf`, `job-607bf8990c6be27356e5e34099da096a`, `job-fd86d4ae77b9ac408ae1d03b28a0236d`, and `job-9bc8714e4767e48935baf2093999b573`. These prove liveness/execution only, not immutable-source validation.
+The 12-worker smoke wave completed successfully: `job-5287aa067d9d3fbd9e1c7934eb954e4b`, `job-e6db274b1ad8091a3e66ace67f81556`, `job-64e924f811a7363a18777d89949c90d9`, `job-4ed6b7026e952f7ff3512716c2e1a5ba`, `job-b946431831e4949adf0337bb377725a3`, `job-c7d5f0834433600e1399569a51c1601e`, `job-a117345d9e54d2a9a35ab44c047f0ca5`, `job-9811dbee4ad71d434776fef40217b35f`, `job-11921afd33945843247931a2fd339bce`, `job-55e56509308b8befca6c0c1517e68207`, `job-38ba5b0934a291eadb58fb1eaeca5ca6`, and `job-8741a219af0e9e020d70d0d22817a0e4`. These prove liveness/execution, not full toolchain readiness.
 
 ## Gates
 
