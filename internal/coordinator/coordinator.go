@@ -142,6 +142,9 @@ func (c *Coordinator) Start(port string) error {
 	}
 
 	c.LocalLLM = localllm.NewClient(llmCfg, nil)
+	if configured := c.Store.CoordinatorCfg.LLM.SearXNGURL; configured != "" {
+		c.Research = &research.SearXNG{BaseURL: configured}
+	}
 	chatHistory, err := chatstore.Open(filepath.Join(c.Store.Dir(), "llm-chat-history.json"))
 	if err != nil {
 		return fmt.Errorf("failed to initialize LLM chat history: %w", err)
