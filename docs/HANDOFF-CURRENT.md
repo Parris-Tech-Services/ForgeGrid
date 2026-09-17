@@ -1,14 +1,14 @@
 # ForgeGrid bring-forward run — current handoff
 
-Updated 2026-09-17 after Phase 3 integration and a Qwen store rollback fix. Claude has stopped; Codex is now the primary implementer. No DadLAN fleet machine has been touched.
+Updated 2026-09-17 after auth hardening and the SSRF-safe research boundary. Claude has stopped; Codex is now the primary implementer. No DadLAN fleet machine has been touched.
 
 ## Current verified state
 
 | Worktree | Branch | HEAD | State |
 |---|---|---|---|
-| `/home/josh/dev/6 Laptops/ForgeGrid` | `feature/qwen-assistant-v2` | `1038713` | clean, pushed |
+| `/home/josh/dev/6 Laptops/ForgeGrid` | `feature/qwen-assistant-v2` | `bfa7942` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-hygiene` | `chore/project-hygiene` | `633d7f5` | clean, pushed |
-| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `72f1404` | clean, pushed |
+| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `04897b3` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-self-update-reliability` | `fix/self-update-reliability` | `9ff9662` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-security-gates` | `fix/structured-execution-security-gates-v2` | `be08bcb` | parked, pushed |
 
@@ -36,11 +36,11 @@ The updater fix is committed and pushed to `origin/fix/self-update-reliability`.
 
 ## Integrated Qwen state
 
-The Qwen branch brings forward the persistent-history lineage through merge `338eacd`, adds hardened JSON persistence and search in `6d6e278`, and fixes failed-append in-memory rollback in `1038713`. The integrated branch contains the earlier work at `765abb1`. Server-side prompt/history assembly is present; chat-only auth, web research, and mobile polish are not yet complete.
+The Qwen branch brings forward the persistent-history lineage through merge `338eacd`, adds hardened JSON persistence and search in `6d6e278`, fixes failed-append in-memory rollback in `1038713`, adds chat-only auth in `326af5c`, and adds the tested SSRF-safe fetch boundary in `bfa7942`. The integrated branch contains these at `04897b3`. Server-side prompt/history assembly and chat-only auth are present; research provider/UI wiring and mobile polish are not yet complete.
 
 ## Next action
 
-Continue Phase 6/7/9 implementation on the Qwen branch, merge each completed branch head into `integration/next`, rerun the full suite, and stop at Checkpoint A before any fleet action with exact immutable SHAs for independent review.
+Continue Phase 9 provider/UI wiring and Phase 7 mobile work on the Qwen branch, merge each completed branch head into `integration/next`, rerun the full suite and cross-compiles, and stop at Checkpoint A before any fleet action with exact immutable SHAs for independent review.
 
 ## Hard boundaries
 
