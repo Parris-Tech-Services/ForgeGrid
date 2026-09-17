@@ -74,8 +74,9 @@ func TestCancellation(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()                                                // cancel immediately
-	res := c.Generate(ctx, Request{}); if res.Status != StatusTimeout && res.Status != StatusUnavailable { // context.Canceled maps to Timeout/Unavailable depending on classification
+	cancel() // cancel immediately
+	res := c.Generate(ctx, Request{})
+	if res.Status != StatusTimeout && res.Status != StatusUnavailable { // context.Canceled maps to Timeout/Unavailable depending on classification
 		t.Fatalf("expected timeout/canceled status, got %v", c.Generate(ctx, Request{}).Status)
 	}
 }

@@ -26,11 +26,11 @@ func (c *Coordinator) handleLLMGenerate(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	
+
 	if req.SystemPrompt == "" {
 		req.SystemPrompt = "You are qwen3.5:4b running via Ollama on JParrisDesktop. JParrisDesktop is a Windows machine on Josh's DadLAN. AVANCE-WS7 is the Fedora machine running the ForgeGrid coordinator. Do not invent meanings for machine names. If a fact is not supplied or observable, say you do not know."
 	}
-	
+
 	if c.LocalLLM == nil {
 		_ = json.NewEncoder(w).Encode(localllm.Result{
 			Status: localllm.StatusCapabilityDisabled,
