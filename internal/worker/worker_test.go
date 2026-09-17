@@ -1,11 +1,52 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestFilePathFromFileURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"windows drive letter", "/C:/dev/6 Laptops/ForgeGrid/update-candidate.exe", "C:/dev/6 Laptops/ForgeGrid/update-candidate.exe"},
+		{"lowercase drive letter", "/d:/temp/x.exe", "d:/temp/x.exe"},
+		{"unix path untouched", "/home/user/forgegrid", "/home/user/forgegrid"},
+		{"too short untouched", "/C", "/C"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := filePathFromFileURL(tc.in); got != tc.want {
+				t.Fatalf("filePathFromFileURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTryBeginUpdateRejectsDuplicateInFlightID(t *testing.T) {
+	w := &Worker{}
+	if !w.tryBeginUpdate("update-1") {
+		t.Fatalf("expected first claim of update-1 to succeed")
+	}
+	if w.tryBeginUpdate("update-1") {
+		t.Fatalf("expected second concurrent claim of update-1 to be rejected")
+	}
+	if !w.tryBeginUpdate("update-2") {
+		t.Fatalf("expected a different update id to be claimable independently")
+	}
+	w.endUpdate("update-1")
+	if !w.tryBeginUpdate("update-1") {
+		t.Fatalf("expected update-1 to be claimable again after endUpdate")
+	}
+}
 
 func TestWorkerCredentials(t *testing.T) {
 	// Setup custom home dir to avoid polluting user space during tests
@@ -67,6 +108,49 @@ func TestWorkerCredentials(t *testing.T) {
 	}
 }
 
+func TestLoadCredsPersistsNameOverHostname(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv("XDG_DATA_HOME", tmpDir)
+	os.Setenv("LOCALAPPDATA", tmpDir)
+	os.Setenv("APPDATA", tmpDir)
+	ResetCredentials()
+
+	// Simulate credentials saved with a custom name
+	creds := WorkerCredentials{
+		WorkerID: "worker-456",
+		NodeName: "Custom-Name",
+	}
+	path := getWorkerCredsPath()
+	os.MkdirAll(filepath.Dir(path), 0700)
+	b, _ := json.MarshalIndent(creds, "", "  ")
+	os.WriteFile(path, b, 0600)
+
+	hostname, _ := os.Hostname()
+
+	// 1. Worker created with default OS hostname
+	w1 := New(hostname, "./tmp-ws", true)
+	w1.LoadCreds()
+	if w1.NodeName != "Custom-Name" {
+		t.Fatalf("Expected NodeName to be restored from creds to Custom-Name, got %s", w1.NodeName)
+	}
+
+	// 2. Worker created with "Unnamed-Node" (fallback test)
+	w2 := New("Unnamed-Node", "./tmp-ws", true)
+	w2.LoadCreds()
+	if w2.NodeName != "Custom-Name" {
+		t.Fatalf("Expected NodeName to be restored from creds, got %s", w2.NodeName)
+	}
+
+	// 3. Worker created with an explicit custom override (not the hostname and not Unnamed)
+	// Currently, LoadCreds overrides ONLY if NodeName matches defaults, so explicit explicit custom
+	// is NOT overridden by LoadCreds. Let's verify that behavior.
+	w3 := New("Different-Custom", "./tmp-ws", true)
+	w3.LoadCreds()
+	if w3.NodeName != "Different-Custom" {
+		t.Fatalf("Expected NodeName to remain Different-Custom if explicitly provided and not default, got %s", w3.NodeName)
+	}
+}
+
 func TestHardwareDetection(t *testing.T) {
 	w := New("TestNode", "./tmp-ws", true)
 	info, err := w.getHardwareInfo()
@@ -80,5 +164,144 @@ func TestHardwareDetection(t *testing.T) {
 	}
 	if info.TotalRAM == 0 {
 		t.Fatalf("TotalRAM reported 0")
+	}
+}
+
+func TestValidateCapabilities(t *testing.T) {
+	w := New("TestNode", "./tmp-ws", true)
+	w.SetLabelsAndCapabilities("", "go,non_existent_tool_12345")
+
+	valid, drift := w.ValidateCapabilities()
+
+	// "go" might not be installed on test env, but we can mock or just check logic.
+	// Actually we expect non_existent_tool_12345 to ALWAYS be in drift.
+	hasDrift := false
+	for _, d := range drift {
+		if d == "non_existent_tool_12345" {
+			hasDrift = true
+		}
+	}
+
+	// Avoid unused variable valid
+	_ = valid
+
+	if !hasDrift {
+		t.Fatalf("Expected non_existent_tool_12345 to be detected as missing drift")
+	}
+}
+
+// TestValidateCapabilitiesReportsFullDetectionWhenNoAllowlistIsConfigured
+// guards the behavior every real DadLAN worker actually relies on: none of
+// them are started with -capabilities, so w.capabilityAllow is empty, and
+// ValidateCapabilities must report exactly what DetectCapabilities finds -
+// unfiltered - rather than silently reporting nothing just because no
+// allowlist was configured. This was verified against two live workers
+// (one reporting zero tools, one reporting a partial set) and in both
+// cases the reported capabilities matched a direct machine-PATH probe run
+// under the same account the worker service runs as.
+func TestValidateCapabilitiesReportsFullDetectionWhenNoAllowlistIsConfigured(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv("XDG_DATA_HOME", tmpDir)
+	os.Setenv("LOCALAPPDATA", tmpDir)
+	os.Setenv("APPDATA", tmpDir)
+	os.Unsetenv("FORGEGRID_CAPABILITIES")
+	w := New("TestNode", "./tmp-ws", true)
+	// capabilityAllow is intentionally left unset, matching real deployments:
+	// no real DadLAN worker is started with -capabilities.
+	valid, drift := w.ValidateCapabilities()
+	if len(drift) != 0 {
+		t.Fatalf("expected no drift when no allowlist is configured, got %#v", drift)
+	}
+	detected := DetectCapabilities()
+	if !sameStringSet(valid, detected) {
+		t.Fatalf("expected ValidateCapabilities() to equal raw DetectCapabilities() when unfiltered, got valid=%#v detected=%#v", valid, detected)
+	}
+}
+
+func TestDetectCapabilitiesIncludesRegisteredAgents(t *testing.T) {
+	caps := DetectCapabilities()
+	// FakeProvider is always available
+	if !hasWorkerString(caps, "agent:fake") {
+		t.Fatalf("expected agent:fake capability to be detected from registered providers, got %#v", caps)
+	}
+}
+
+func TestDetectCapabilitiesIncludesGitAndAIAgentWhenAvailable(t *testing.T) {
+	caps := DetectCapabilities()
+	if _, err := exec.LookPath("git"); err == nil && !hasWorkerString(caps, "git") {
+		t.Fatalf("expected git capability when git is available, got %#v", caps)
+	}
+	if !hasWorkerString(caps, "agent:fake") {
+		t.Fatalf("expected agent:fake capability, got %#v", caps)
+	}
+}
+
+func TestClassifyConnectionErrorExplainsTLSMismatch(t *testing.T) {
+	msg := classifyConnectionError(fmt.Errorf("Get https://host: certificate fingerprint mismatch! expected: old got: new"))
+	if !strings.Contains(msg, "Worker cannot verify coordinator identity") {
+		t.Fatalf("unexpected message: %s", msg)
+	}
+}
+
+func hasWorkerString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestLoadPolicyRestoresBootstrapPermission(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("LOCALAPPDATA", tmpDir)
+	t.Setenv("APPDATA", tmpDir)
+
+	if err := WritePolicy(Policy{
+		AllowedRepos:   []string{"https://github.com/example/repo.git"},
+		AllowPush:      true,
+		AllowBootstrap: true,
+		Labels:         []string{"trusted"},
+		Capabilities:   []string{"go"},
+	}); err != nil {
+		t.Fatalf("WritePolicy failed: %v", err)
+	}
+
+	w := New("TestNode", "./tmp-ws", true)
+	if !w.allowBootstrap {
+		t.Fatal("expected allowBootstrap to be restored from policy")
+	}
+	if !w.allowPush {
+		t.Fatal("expected allowPush to be restored from policy")
+	}
+	if !w.allowedRepos["https://github.com/example/repo.git"] {
+		t.Fatal("expected allowed repo to be restored from policy")
+	}
+}
+
+func TestRunAutoValidationRunsGoTests(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not available")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/validation\n\ngo 1.23\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "main_test.go"), []byte(`package validation
+
+import "testing"
+
+func TestValidation(t *testing.T) {}
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	results := runAutoValidation(context.Background(), root, []string{"go"})
+	if len(results) != 1 {
+		t.Fatalf("expected one validation result, got %#v", results)
+	}
+	if results[0].Name != "Go tests" || results[0].Status != "COMPLETED" {
+		t.Fatalf("unexpected validation result: %#v", results[0])
 	}
 }

@@ -4,20 +4,33 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"forgegrid/internal/agent"
 	"forgegrid/internal/execution"
+	"forgegrid/internal/gitworkspace"
 	"forgegrid/internal/models"
 	"forgegrid/internal/network"
+	fgupdate "forgegrid/internal/update"
+	"forgegrid/internal/version"
 
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
@@ -31,12 +44,57 @@ type Worker struct {
 	Token          string
 	NodeName       string
 	Client         *http.Client
+	// DownloadClient is used only for pulling update artifact bytes from the
+	// coordinator. It shares Client's transport/TLS pinning but needs a much
+	// longer timeout: Client's 10s timeout is sized for small poll/report
+	// JSON calls and is not enough time to reliably pull a multi-MB binary
+	// over a real network to a physical machine, even though it is more
+	// than enough for the same transfer in a fast/local test environment.
+	DownloadClient *http.Client
 	Workspace      string
 	Insecure       bool
 	Fingerprint    string
 
-	mu         sync.Mutex
-	activeJobs map[string]context.CancelFunc
+	mu               sync.Mutex
+	reportDrainMu    sync.Mutex
+	jobReportDrainMu sync.Mutex
+	activeJobs       map[string]context.CancelFunc
+	stopOnce         sync.Once
+	stopCh           chan struct{}
+	loopsDone        sync.WaitGroup
+	allowedRepos     map[string]bool
+	allowPush        bool
+	allowBootstrap   bool
+	Labels           []string
+	Capabilities     []string
+	capabilityAllow  []string
+	pendingUpdateIDs map[string]bool
+}
+
+// tryBeginUpdate claims update id for this worker process, returning false
+// if a stageUpdate goroutine for that same update is already in flight.
+// Without this, a poll response that arrives while an earlier stageUpdate
+// call for the same id hasn't yet reported "running" back to the
+// coordinator could otherwise launch a second, concurrent staging attempt.
+func (w *Worker) tryBeginUpdate(id string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.pendingUpdateIDs == nil {
+		w.pendingUpdateIDs = make(map[string]bool)
+	}
+	if w.pendingUpdateIDs[id] {
+		return false
+	}
+	w.pendingUpdateIDs[id] = true
+	return true
+}
+
+// endUpdate releases the claim taken by tryBeginUpdate. It is safe to call
+// even if the update was never claimed (a plain failed no-op).
+func (w *Worker) endUpdate(id string) {
+	w.mu.Lock()
+	delete(w.pendingUpdateIDs, id)
+	w.mu.Unlock()
 }
 
 type WorkerCredentials struct {
@@ -48,7 +106,35 @@ type WorkerCredentials struct {
 	Insecure       bool   `json:"insecure"`
 }
 
+type Policy struct {
+	AllowedRepos   []string `json:"allowed_repos"`
+	AllowPush      bool     `json:"allow_push"`
+	AllowBootstrap bool     `json:"allow_bootstrap"`
+	Labels         []string `json:"labels"`
+	Capabilities   []string `json:"capabilities"`
+}
+
 func getWorkerCredsPath() string {
+	return filepath.Join(getWorkerDataDir(), "worker_creds.json")
+}
+
+func WorkerCredsPath() string {
+	return getWorkerCredsPath()
+}
+
+func getWorkerPolicyPath() string {
+	return filepath.Join(getWorkerDataDir(), "worker_policy.json")
+}
+
+func WorkerPolicyPath() string {
+	return getWorkerPolicyPath()
+}
+
+func WorkerStatusPath() string {
+	return filepath.Join(getWorkerDataDir(), "worker_status.json")
+}
+
+func getWorkerDataDir() string {
 	var dir string
 	if runtime.GOOS == "windows" {
 		dir = os.Getenv("LOCALAPPDATA")
@@ -69,7 +155,11 @@ func getWorkerCredsPath() string {
 	if runtime.GOOS == "linux" {
 		name = "forgegrid"
 	}
-	return filepath.Join(dir, name, "worker_creds.json")
+	return filepath.Join(dir, name)
+}
+
+func WorkerDataDir() string {
+	return getWorkerDataDir()
 }
 
 func ResetCredentials() error {
@@ -82,12 +172,249 @@ func ResetCredentials() error {
 }
 
 func New(nodeName, workspace string, insecure bool) *Worker {
-	return &Worker{
-		NodeName:   nodeName,
-		Workspace:  workspace,
-		Insecure:   insecure,
-		activeJobs: make(map[string]context.CancelFunc),
+	w := &Worker{
+		NodeName:        nodeName,
+		Workspace:       workspace,
+		Insecure:        insecure,
+		activeJobs:      make(map[string]context.CancelFunc),
+		stopCh:          make(chan struct{}),
+		allowedRepos:    parseRepoAllowlist(os.Getenv("FORGEGRID_ALLOWED_REPOS")),
+		allowPush:       os.Getenv("FORGEGRID_ALLOW_PUSH") == "true",
+		allowBootstrap:  os.Getenv("FORGEGRID_ALLOW_BOOTSTRAP") == "true",
+		Labels:          parseCSV(os.Getenv("FORGEGRID_LABELS")),
+		capabilityAllow: parseCSV(os.Getenv("FORGEGRID_CAPABILITIES")),
 	}
+	w.LoadPolicy()
+	if envRepos := strings.TrimSpace(os.Getenv("FORGEGRID_ALLOWED_REPOS")); envRepos != "" {
+		w.allowedRepos = parseRepoAllowlist(envRepos)
+	}
+	if os.Getenv("FORGEGRID_ALLOW_PUSH") == "true" {
+		w.allowPush = true
+	}
+	if os.Getenv("FORGEGRID_ALLOW_BOOTSTRAP") == "true" {
+		w.allowBootstrap = true
+	}
+	if labels := strings.TrimSpace(os.Getenv("FORGEGRID_LABELS")); labels != "" {
+		w.Labels = parseCSV(labels)
+	}
+	if capabilities := strings.TrimSpace(os.Getenv("FORGEGRID_CAPABILITIES")); capabilities != "" {
+		w.capabilityAllow = parseCSV(capabilities)
+	}
+	w.RefreshCapabilities()
+	return w
+}
+
+func parseCSV(raw string) []string {
+	var vals []string
+	for _, repo := range strings.Split(raw, ",") {
+		repo = strings.TrimSpace(repo)
+		if repo != "" {
+			vals = append(vals, repo)
+		}
+	}
+	return vals
+}
+
+func parseRepoAllowlist(raw string) map[string]bool {
+	allowed := make(map[string]bool)
+	for _, repo := range parseCSV(raw) {
+		allowed[repo] = true
+	}
+	return allowed
+}
+
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]int, len(a))
+	for _, v := range a {
+		set[v]++
+	}
+	for _, v := range b {
+		if set[v] == 0 {
+			return false
+		}
+		set[v]--
+	}
+	return true
+}
+
+func (w *Worker) SetGitPolicy(allowedRepos string, allowPush bool) {
+	if strings.TrimSpace(allowedRepos) != "" {
+		w.allowedRepos = parseRepoAllowlist(allowedRepos)
+	}
+	if allowPush {
+		w.allowPush = true
+	}
+}
+
+func (w *Worker) SetLabelsAndCapabilities(labels, capabilities string) {
+	if strings.TrimSpace(labels) != "" {
+		w.Labels = parseCSV(labels)
+	}
+	if strings.TrimSpace(capabilities) != "" {
+		w.capabilityAllow = parseCSV(capabilities)
+		w.RefreshCapabilities()
+	}
+}
+
+func (w *Worker) ValidateCapabilities() ([]string, []string) {
+	detected := DetectCapabilities()
+	if len(w.capabilityAllow) == 0 {
+		return detected, nil
+	}
+	detectedSet := make(map[string]bool, len(detected))
+	for _, cap := range detected {
+		detectedSet[cap] = true
+	}
+	valid := make([]string, 0, len(w.capabilityAllow))
+	missing := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, cap := range w.capabilityAllow {
+		cap = strings.ToLower(strings.TrimSpace(cap))
+		if cap == "" || seen[cap] {
+			continue
+		}
+		seen[cap] = true
+		if detectedSet[cap] {
+			valid = append(valid, cap)
+		} else {
+			missing = append(missing, cap)
+		}
+	}
+	return valid, missing
+}
+
+func (w *Worker) RefreshCapabilities() {
+	valid, _ := w.ValidateCapabilities()
+	w.Capabilities = valid
+}
+
+func DetectCapabilities() []string {
+	checks := []struct {
+		name string
+		ok   func() bool
+	}{
+		{"git", commandOK("git", "--version")},
+		{"python", pythonOK},
+		{"go", commandOK("go", "version")},
+		{"node", commandOK("node", "--version")},
+		{"agent:antigravity", antigravityOK},
+		{"agent:codex", commandOK("codex", "--version")},
+		{"godot", godotOK},
+	}
+	var caps []string
+	seen := make(map[string]bool)
+	for _, check := range checks {
+		if check.ok() {
+			caps = append(caps, check.name)
+			seen[check.name] = true
+		}
+	}
+
+	for _, p := range agent.RegisteredProviders() {
+		capName := "agent:" + p.ID()
+		if !seen[capName] {
+			if p.Detect(context.Background()).Available {
+				caps = append(caps, capName)
+				seen[capName] = true
+			}
+		}
+	}
+
+	return caps
+}
+
+func commandOK(name string, args ...string) func() bool {
+	return func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, name, args...)
+		return cmd.Run() == nil
+	}
+}
+
+func pythonOK() bool {
+	return commandOK("python", "-c", "import sys; sys.exit(0)")() || commandOK("python3", "-c", "import sys; sys.exit(0)")()
+}
+
+func antigravityOK() bool {
+	if path := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PATH")); path != "" {
+		return fileExecutableExists(path)
+	}
+	if _, err := exec.LookPath("antigravity"); err == nil {
+		return true
+	}
+	if _, err := exec.LookPath("antigravity.exe"); err == nil {
+		return true
+	}
+	for _, root := range []string{os.Getenv("LOCALAPPDATA"), os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)")} {
+		if root == "" {
+			continue
+		}
+		for _, candidate := range []string{
+			filepath.Join(root, "Programs", "Antigravity", "Antigravity.exe"),
+			filepath.Join(root, "Antigravity", "Antigravity.exe"),
+			filepath.Join(root, "Google", "Antigravity", "Antigravity.exe"),
+		} {
+			if fileExecutableExists(candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func godotOK() bool {
+	return commandOK("godot", "--version")() || commandOK("godot4", "--version")()
+}
+
+func commandPathOK(path string, args ...string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, args...)
+	return cmd.Run() == nil
+}
+
+func fileExecutableExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func (w *Worker) LoadPolicy() error {
+	b, err := os.ReadFile(getWorkerPolicyPath())
+	if err != nil {
+		return err
+	}
+	var p Policy
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	w.allowedRepos = make(map[string]bool)
+	for _, repo := range p.AllowedRepos {
+		repo = strings.TrimSpace(repo)
+		if repo != "" {
+			w.allowedRepos[repo] = true
+		}
+	}
+	w.allowPush = p.AllowPush
+	w.allowBootstrap = p.AllowBootstrap
+	w.Labels = append([]string{}, p.Labels...)
+	w.capabilityAllow = append([]string{}, p.Capabilities...)
+	return nil
+}
+
+func WritePolicy(p Policy) error {
+	dir := getWorkerDataDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(getWorkerPolicyPath(), b, 0600)
 }
 
 func (w *Worker) LoadCreds() error {
@@ -103,8 +430,11 @@ func (w *Worker) LoadCreds() error {
 	w.WorkerID = creds.WorkerID
 	w.Token = creds.Token
 	w.CoordinatorURL = creds.CoordinatorURL
-	if w.NodeName == "Unnamed-Node" || w.NodeName == "" {
-		w.NodeName = creds.NodeName
+	hostname, _ := os.Hostname()
+	if w.NodeName == "Unnamed-Node" || w.NodeName == "" || w.NodeName == hostname {
+		if creds.NodeName != "" {
+			w.NodeName = creds.NodeName
+		}
 	}
 	w.Insecure = creds.Insecure
 	w.Fingerprint = creds.Fingerprint
@@ -112,17 +442,38 @@ func (w *Worker) LoadCreds() error {
 	return nil
 }
 
+// downloadClientTimeout is generous on purpose: it bounds a real artifact
+// transfer to a physical remote machine, not a lightweight poll/report call.
+const downloadClientTimeout = 5 * time.Minute
+
+var artifactDownloadLimit int64 = 50 * 1024 * 1024
+
 func (w *Worker) SetupClient(fingerprint string) {
 	if w.Insecure {
 		w.Client = &http.Client{Timeout: 10 * time.Second}
+		w.DownloadClient = &http.Client{Timeout: downloadClientTimeout}
 		return
 	}
-	tr := &http.Transport{
-		TLSClientConfig: network.PinTLSConfig(fingerprint),
-	}
+	// Client and DownloadClient deliberately do NOT share a Transport/connection
+	// pool. A standalone reproduction of this exact download using a fresh
+	// Transport succeeded instantly on the same real hardware where the
+	// installed worker (whose DownloadClient previously shared Client's
+	// Transport, reused continuously for polling every few seconds) got a
+	// silent zero-byte body. Sharing a connection pool between frequent small
+	// polls and rare large downloads risks the download reusing a pooled
+	// keep-alive connection left in a bad state by prior traffic; giving the
+	// download its own Transport means it always dials fresh.
 	w.Client = &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: tr,
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: network.PinTLSConfig(fingerprint),
+		},
+	}
+	w.DownloadClient = &http.Client{
+		Timeout: downloadClientTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: network.PinTLSConfig(fingerprint),
+		},
 	}
 }
 
@@ -131,6 +482,14 @@ func (w *Worker) getHardwareInfo() (models.WorkerDTO, error) {
 	info.NodeName = w.NodeName
 	info.OS = runtime.GOOS
 	info.Architecture = runtime.GOARCH
+	info.Version = version.Info()
+	info.Labels = append([]string{}, w.Labels...)
+	validCaps, drift := w.ValidateCapabilities()
+	if len(drift) > 0 {
+		log.Printf("Capability drift detected: %v are configured but missing from PATH", drift)
+	}
+	w.Capabilities = append([]string{}, validCaps...)
+	info.Capabilities = append([]string{}, validCaps...)
 
 	if h, err := host.Info(); err == nil {
 		info.OSVersion = h.PlatformVersion
@@ -197,11 +556,19 @@ func (w *Worker) Pair(ip, code, fingerprint string) error {
 		"total_ram":           hw.TotalRAM,
 		"available_ram":       hw.AvailableRAM,
 		"free_workspace_disk": hw.FreeWorkspaceDisk,
+		"cpu_percent":         w.cpuPercent(),
+		"uptime_seconds":      w.uptimeSeconds(),
+		"active_job_count":    w.activeJobCount(),
+		"worker_health":       w.workerHealth(),
+		"labels":              hw.Labels,
+		"capabilities":        hw.Capabilities,
+		"version":             hw.Version,
 	}
 	body, _ := json.Marshal(reqBody)
 
 	resp, err := w.Client.Post(w.CoordinatorURL+"/api/workers/pair", "application/json", bytes.NewReader(body))
 	if err != nil {
+		w.writeStatus("pair_failed", classifyConnectionError(err), false)
 		return err
 	}
 	defer resp.Body.Close()
@@ -209,6 +576,7 @@ func (w *Worker) Pair(ip, code, fingerprint string) error {
 	if resp.StatusCode != http.StatusOK {
 		var errRes models.ErrorResponse
 		json.NewDecoder(resp.Body).Decode(&errRes)
+		w.writeStatus("pair_failed", fmt.Sprintf("%s: %s", errRes.Code, errRes.Message), false)
 		return fmt.Errorf("pairing failed: %s - %s", errRes.Code, errRes.Message)
 	}
 
@@ -217,6 +585,7 @@ func (w *Worker) Pair(ip, code, fingerprint string) error {
 		Token    string `json:"token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		w.writeStatus("pair_failed", err.Error(), false)
 		return err
 	}
 
@@ -241,6 +610,7 @@ func (w *Worker) Pair(ip, code, fingerprint string) error {
 		os.Rename(tmp, path)
 	}
 
+	w.writeStatus("paired", "Worker paired and trusted coordinator fingerprint "+w.Fingerprint, true)
 	fmt.Println("Successfully paired. Worker ID:", w.WorkerID)
 	return nil
 }
@@ -249,18 +619,357 @@ func (w *Worker) Start() {
 	if w.Client == nil {
 		w.Client = &http.Client{Timeout: 10 * time.Second} // Should only happen in tests that bypassed Pair
 	}
+	if w.DownloadClient == nil {
+		w.DownloadClient = &http.Client{Timeout: downloadClientTimeout} // Should only happen in tests that bypassed Pair
+	}
+
+	w.cleanupUpdateFiles()
+	w.verifyUpdateTransaction()
+
+	w.loopsDone.Add(2)
 	go w.heartbeatLoop()
 	go w.jobLoop()
 }
 
+func (w *Worker) verifyUpdateTransaction() {
+	txID := os.Getenv("FORGEGRID_UPDATE_TX")
+
+	tx, err := readTx()
+	if err != nil {
+		return
+	}
+
+	// If txID is not empty, ensure it matches. If empty (e.g. started by Windows SCM), we just use the active tx.
+	if txID != "" && tx.ID != txID {
+		return
+	}
+
+	if tx.CurrentState == "COMPLETED" || tx.CurrentState == "ROLLED_BACK" || tx.CurrentState == "ROLLBACK_FAILED" || tx.CurrentState == "FAILED" {
+		return
+	}
+
+	if tx.CurrentState == "STAGED" || tx.CurrentState == "APPLYING" {
+		w.recoverStagedOrApplying(tx)
+		return
+	}
+
+	if tx.CurrentState == "ROLLING_BACK" {
+		// Wait briefly to ensure any prior connection closes, then send heartbeat
+		time.Sleep(1 * time.Second)
+		w.sendHeartbeat()
+		status, _ := readStatus()
+		if status == nil || status.State != "heartbeat_ok" {
+			log.Printf("[Update] Rollback failed health verification: could not reconnect to coordinator")
+			w.reportUpdate(tx.ID, "rollback_failed", "Rollback failed: could not reconnect to coordinator", true)
+			tx.CurrentState = "ROLLBACK_FAILED"
+			logWriteTxErr(tx, "ROLLBACK_FAILED: could not reconnect to coordinator")
+			return
+		}
+
+		exe, _ := os.Executable()
+		hash, _ := fileSHA256(exe)
+		if tx.OldSHA256 != "" && hash != tx.OldSHA256 {
+			log.Printf("[Update] Rollback failed health verification: running hash did not match old hash")
+			w.reportUpdate(tx.ID, "rollback_failed", "Rollback failed: running hash did not match old hash", true)
+			tx.CurrentState = "ROLLBACK_FAILED"
+			logWriteTxErr(tx, "ROLLBACK_FAILED: running hash did not match old hash")
+			return
+		}
+
+		w.reportUpdate(tx.ID, "rolled_back", "New worker did not reconnect within time limit. Previous version restored successfully. Reason: "+tx.RollbackReason, true)
+		log.Printf("[Update] Previous worker restored")
+		tx.CurrentState = "ROLLED_BACK"
+		logWriteTxErr(tx, "ROLLED_BACK")
+		return
+	}
+
+	if tx.CurrentState != "VERIFYING_NEW_WORKER" && tx.CurrentState != "RESTARTING" {
+		return
+	}
+
+	w.verifyCandidate(tx)
+}
+
+// verifyCandidate performs the candidate worker's own post-swap health
+// check: hash the running executable against the expected candidate
+// hash, confirm it can reach the coordinator, and report completion.
+// Extracted from verifyUpdateTransaction so recoverStagedOrApplying can
+// reuse it directly for the case where an APPLYING transaction's swap is
+// found (by hash, not by trusting the stale label) to have already
+// succeeded before a crash.
+func (w *Worker) verifyCandidate(tx *UpdateTransaction) {
+	log.Printf("[Update] Candidate installed")
+	log.Printf("[Update] Starting candidate worker")
+	log.Printf("[Update] Waiting for coordinator handshake")
+
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+
+	hash, err := fileSHA256(exe)
+	if err != nil || hash != tx.ExpectedSHA256 {
+		log.Printf("[Update] Candidate failed health verification: running hash %s did not match expected %s", hash, tx.ExpectedSHA256)
+		w.failCandidateVerification(tx, fmt.Sprintf("running hash %s did not match expected %s", hash, tx.ExpectedSHA256))
+		return
+	}
+
+	// Wait briefly to ensure any prior connection closes, then send heartbeat
+	time.Sleep(1 * time.Second)
+	w.sendHeartbeat()
+
+	status, _ := readStatus()
+	if status == nil || status.State != "heartbeat_ok" {
+		log.Printf("[Update] Candidate failed health verification: could not reconnect to coordinator")
+		w.failCandidateVerification(tx, "could not reconnect to coordinator")
+		return
+	}
+
+	log.Printf("[Update] Candidate verified")
+	w.reportUpdate(tx.ID, "completed", "Worker successfully updated and verified.", true)
+
+	tx.CurrentState = "COMPLETED"
+	logWriteTxErr(tx, "COMPLETED")
+	log.Printf("[Update] Transaction completed")
+}
+
+// recoverStagedOrApplying handles a worker starting up (crash, reboot, or
+// an SCM auto-restart) with a persisted transaction still in STAGED or
+// APPLYING - the two states verifyUpdateTransaction previously had no
+// branch for at all, silently abandoning the transaction and leaving the
+// coordinator believing the update was still "running" forever.
+func (w *Worker) recoverStagedOrApplying(tx *UpdateTransaction) {
+	if tx.CurrentState == "STAGED" {
+		w.recoverStaged(tx)
+		return
+	}
+	w.recoverApplying(tx)
+}
+
+// recoverStaged handles a restart while CurrentState is still STAGED.
+// writeTx(APPLYING) always happens in RunUpdater before swapBinaries is
+// ever called, so a persisted STAGED state proves the swap itself never
+// started: OldBinaryPath is provably untouched. Nothing destructive has
+// happened, so recovery only ever needs to either resume (relaunch the
+// updater helper against the still-staged candidate) or fail closed and
+// let the coordinator queue a fresh update - never a binary restore.
+func (w *Worker) recoverStaged(tx *UpdateTransaction) {
+	exe, err := os.Executable()
+	if err != nil {
+		w.failStagedRecovery(tx, "could not locate running executable: "+err.Error())
+		return
+	}
+	hash, err := fileSHA256(exe)
+	if err != nil {
+		w.failStagedRecovery(tx, "could not hash running executable: "+err.Error())
+		return
+	}
+	if tx.OldSHA256 != "" && hash != tx.OldSHA256 {
+		w.failStagedRecovery(tx, "running binary does not match the recorded pre-update hash; will not guess")
+		return
+	}
+	newHash, err := fileSHA256(tx.NewBinaryPath)
+	if err != nil {
+		w.failStagedRecovery(tx, "staged candidate artifact is missing or unreadable: "+err.Error())
+		return
+	}
+	if tx.ExpectedSHA256 != "" && newHash != tx.ExpectedSHA256 {
+		w.failStagedRecovery(tx, "staged candidate artifact failed checksum verification on resume")
+		return
+	}
+	if _, err := os.Stat(tx.UpdaterHelperPath); err != nil {
+		w.failStagedRecovery(tx, "updater helper copy is missing: "+err.Error())
+		return
+	}
+
+	log.Printf("[Update] Resuming STAGED transaction %s after restart", tx.ID)
+	w.reportUpdate(tx.ID, "running", "Resumed staged update after a worker restart", false)
+	if err := launchUpdaterHelper(tx.UpdaterHelperPath); err != nil {
+		w.failStagedRecovery(tx, "could not relaunch updater helper: "+err.Error())
+		return
+	}
+	// Mirrors stageUpdate's own end-of-flow: get out of the way so the
+	// freshly relaunched helper can perform the swap.
+	osExit(0)
+}
+
+// failStagedRecovery abandons a STAGED transaction cleanly: nothing
+// destructive has happened (see recoverStaged), so the only obligations
+// are telling the coordinator and clearing local state so a fresh update
+// can be queued and attempted later.
+func (w *Worker) failStagedRecovery(tx *UpdateTransaction, reason string) {
+	log.Printf("[Update] STAGED recovery failing closed: %s", reason)
+	tx.CurrentState = "FAILED"
+	tx.RollbackReason = reason
+	logWriteTxErr(tx, "FAILED (staged recovery)")
+	w.reportUpdate(tx.ID, "failed", "Update abandoned after restart: "+reason, false)
+}
+
+// recoverApplying handles a restart while CurrentState is still APPLYING -
+// meaning a crash landed somewhere inside swapBinaries, and the persisted
+// label alone cannot say which side of the swap actually completed. It
+// inspects the real on-disk binaries by hash (inspectSwapState) rather
+// than guessing, and only ever fails closed via the existing, well-tested
+// rollback() when the state can't be proven safe.
+func (w *Worker) recoverApplying(tx *UpdateTransaction) {
+	switch inspectSwapState(tx) {
+	case swapNotStarted:
+		log.Printf("[Update] APPLYING recovery: swap never completed and the pre-update binary is intact; retrying the swap for %s", tx.ID)
+		if err := swapBinaries(tx); err != nil {
+			tx.RollbackReason = "Swap retry after restart failed: " + err.Error()
+			rollback(tx)
+			return
+		}
+		tx.CurrentState = "RESTARTING"
+		if err := writeTx(tx); err != nil {
+			tx.RollbackReason = "Could not persist RESTARTING state after resumed swap: " + err.Error()
+			rollback(tx)
+			return
+		}
+		if err := GetLifecycle(tx.LifecycleMode).Start(tx); err != nil {
+			tx.RollbackReason = "Start failed after resumed swap: " + err.Error()
+			rollback(tx)
+			return
+		}
+		tx.CurrentState = "VERIFYING_NEW_WORKER"
+		logWriteTxErr(tx, "VERIFYING_NEW_WORKER (resumed from APPLYING)")
+		// This process is still the pre-update binary - it is not the
+		// candidate that Start() above just launched, so it must not go
+		// on to run verifyCandidate itself. A fresh process (the one
+		// Start() just launched) will do that on its own startup.
+		osExit(0)
+
+	case swapAlreadyApplied:
+		// The rename already landed before the crash. Whichever process
+		// is running this code IS the candidate, since OldBinaryPath now
+		// holds the new binary by construction - re-enter exactly where
+		// VERIFYING_NEW_WORKER already handles this, rather than
+		// duplicating that logic.
+		log.Printf("[Update] APPLYING recovery: swap already completed before the restart; resuming verification for %s", tx.ID)
+		tx.CurrentState = "VERIFYING_NEW_WORKER"
+		logWriteTxErr(tx, "VERIFYING_NEW_WORKER (recovered from APPLYING)")
+		w.verifyCandidate(tx)
+
+	case swapInterruptedRestorable:
+		log.Printf("[Update] APPLYING recovery: crash during the binary swap; restoring the previous binary from safeReplace's side-copy for %s", tx.ID)
+		if err := os.Rename(tx.OldBinaryPath+".replaced", tx.OldBinaryPath); err != nil {
+			tx.RollbackReason = "Could not restore previous binary after an interrupted swap: " + err.Error()
+			rollback(tx)
+			return
+		}
+		if hash, err := fileSHA256(tx.OldBinaryPath); err != nil || (tx.OldSHA256 != "" && hash != tx.OldSHA256) {
+			tx.CurrentState = "ROLLBACK_FAILED"
+			tx.RollbackReason = "Restored binary failed hash verification after an interrupted swap"
+			logWriteTxErr(tx, "ROLLBACK_FAILED (interrupted swap restore)")
+			w.reportUpdate(tx.ID, "rollback_failed", tx.RollbackReason, true)
+			return
+		}
+		tx.CurrentState = "ROLLED_BACK"
+		logWriteTxErr(tx, "ROLLED_BACK (interrupted swap)")
+		w.reportUpdate(tx.ID, "rolled_back", "Previous binary restored after a crash during the binary swap", true)
+
+	default: // swapAmbiguous
+		log.Printf("[Update] APPLYING recovery: on-disk binary state for %s cannot be determined safely; failing closed via rollback()", tx.ID)
+		tx.RollbackReason = "APPLYING recovery could not determine on-disk binary state after a restart; failing closed"
+		rollback(tx)
+	}
+}
+
+// osExit is a package variable, not a direct os.Exit call, so tests can
+// override it to observe a failed-verification path without actually
+// terminating the test binary.
+var osExit = os.Exit
+
+// failCandidateVerification handles a candidate worker (the newly-swapped
+// binary, already running as OldBinaryPath) failing its own post-swap
+// health check. It used to just call os.Exit(1): on a real Windows
+// service, the SCM would then restart the same (still broken) candidate
+// binary, which would fail this same check again, forever - with the
+// verified-good backup sitting right there unused, since nothing ever
+// initiated a rollback. The candidate process cannot safely rename or
+// delete its own executable file while it's running (Windows keeps a
+// running exe's file locked), so it cannot call rollback() directly:
+// instead it marks the transaction ROLLING_BACK and relaunches the
+// standalone updater helper binary (a separate file, unaffected by the
+// lock on the candidate's own exe) to perform the actual rollback, then
+// exits so the helper's rename can succeed. This reuses the exact same
+// ROLLING_BACK handling RunUpdater() already has for the case where the
+// original helper's own waitForHealth() deadline expires instead.
+func (w *Worker) failCandidateVerification(tx *UpdateTransaction, reason string) {
+	tx.RollbackReason = "Candidate failed health verification: " + reason
+	tx.CurrentState = "ROLLING_BACK"
+	logWriteTxErr(tx, "ROLLING_BACK")
+	if tx.UpdaterHelperPath == "" {
+		log.Printf("[Update] No updater helper path recorded for this transaction; cannot relaunch to roll back")
+	} else if err := launchUpdaterHelper(tx.UpdaterHelperPath); err != nil {
+		log.Printf("[Update] Could not relaunch updater helper to roll back: %v", err)
+	}
+	osExit(1)
+}
+
+func (w *Worker) cleanupUpdateFiles() {
+	tx, _ := readTx()
+	if tx != nil && (tx.CurrentState == "STAGED" || tx.CurrentState == "APPLYING" || tx.CurrentState == "RESTARTING" || tx.CurrentState == "VERIFYING_NEW_WORKER" || tx.CurrentState == "ROLLING_BACK") {
+		// Active transaction, do not clean up
+		return
+	}
+
+	updateDir := filepath.Join(getWorkerDataDir(), "updates")
+	entries, err := os.ReadDir(updateDir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), "updater-helper-") {
+			path := filepath.Join(updateDir, entry.Name())
+			os.Remove(path)
+		}
+	}
+}
+
+func (w *Worker) Stop() {
+	w.stopOnce.Do(func() {
+		close(w.stopCh)
+		w.mu.Lock()
+		for jobID, cancel := range w.activeJobs {
+			cancel()
+			delete(w.activeJobs, jobID)
+		}
+		w.mu.Unlock()
+	})
+	w.loopsDone.Wait()
+}
+
+var heartbeatInterval = 5 * time.Second
+
 func (w *Worker) heartbeatLoop() {
+	defer w.loopsDone.Done()
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
 	for {
 		w.sendHeartbeat()
-		time.Sleep(5 * time.Second)
+		go w.retryPendingUpdateReport()
+		go w.retryPendingJobReports()
+		select {
+		case <-w.stopCh:
+			return
+		case <-ticker.C:
+		}
 	}
 }
 
 func (w *Worker) sendHeartbeat() {
+	validCaps, drift := w.ValidateCapabilities()
+	if len(drift) > 0 {
+		log.Printf("Capability drift detected: %v are configured but missing from PATH", drift)
+	}
+	w.mu.Lock()
+	w.Capabilities = validCaps
+	labels := append([]string{}, w.Labels...)
+	capabilities := append([]string{}, w.Capabilities...)
+	w.mu.Unlock()
+
 	var avail uint64
 	if v, err := mem.VirtualMemory(); err == nil {
 		avail = v.Available
@@ -273,11 +982,22 @@ func (w *Worker) sendHeartbeat() {
 			free = d.Free
 		}
 	}
+	cpuPercent := w.cpuPercent()
+	uptimeSeconds := w.uptimeSeconds()
+	activeJobCount := w.activeJobCount()
+	workerHealth := w.workerHealth()
 
 	reqBody := map[string]interface{}{
 		"worker_id":           w.WorkerID,
 		"available_ram":       avail,
 		"free_workspace_disk": free,
+		"cpu_percent":         cpuPercent,
+		"uptime_seconds":      uptimeSeconds,
+		"active_job_count":    activeJobCount,
+		"worker_health":       workerHealth,
+		"labels":              labels,
+		"capabilities":        capabilities,
+		"version":             version.Info(),
 	}
 	body, _ := json.Marshal(reqBody)
 
@@ -287,26 +1007,125 @@ func (w *Worker) sendHeartbeat() {
 
 	resp, err := w.Client.Do(req)
 	if err != nil {
-		fmt.Println("Heartbeat failed:", err)
+		message := classifyConnectionError(err)
+		w.writeStatus("heartbeat_failed", message, false)
+		fmt.Println("Heartbeat failed:", message)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
+		w.writeStatus("authentication_failed", "Coordinator rejected saved worker token. Re-pair this worker from the dashboard.", false)
 		fmt.Println("Authentication rejected by coordinator. Your credentials may have been revoked or the coordinator was reset.")
 		fmt.Println("Please run ForgeGrid with --reset-worker to clear saved credentials and pair again.")
 		os.Exit(1)
 	}
+	if resp.StatusCode >= 400 {
+		w.writeStatus("heartbeat_failed", fmt.Sprintf("Coordinator returned HTTP %d", resp.StatusCode), false)
+		return
+	}
+	w.writeStatus("heartbeat_ok", "Connected to trusted coordinator", true)
+}
+
+func (w *Worker) cpuPercent() float64 {
+	values, err := cpu.Percent(0, false)
+	if err != nil || len(values) == 0 {
+		return 0
+	}
+	return values[0]
+}
+
+func (w *Worker) uptimeSeconds() uint64 {
+	uptime, err := host.Uptime()
+	if err != nil {
+		return 0
+	}
+	return uptime
+}
+
+func (w *Worker) activeJobCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.activeJobs)
+}
+
+func (w *Worker) workerHealth() string {
+	_, drift := w.ValidateCapabilities()
+	if len(drift) > 0 {
+		return "limited"
+	}
+	return "ready"
+}
+
+func (w *Worker) writeStatus(state, message string, connected bool) {
+	status := map[string]interface{}{
+		"state":           state,
+		"message":         message,
+		"connected":       connected,
+		"coordinator_url": w.CoordinatorURL,
+		"fingerprint":     w.Fingerprint,
+		"worker_id":       w.WorkerID,
+		"node_name":       w.NodeName,
+		"updated_at":      time.Now().Format(time.RFC3339),
+	}
+	b, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(getWorkerDataDir(), 0700); err != nil {
+		return
+	}
+	_ = os.WriteFile(WorkerStatusPath(), b, 0600)
+}
+
+func classifyConnectionError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "certificate fingerprint mismatch"):
+		return "Worker cannot verify coordinator identity. The saved TLS fingerprint does not match the coordinator certificate. Do not auto-trust this; confirm the coordinator is correct and re-pair only if the coordinator identity was intentionally reset. Detail: " + msg
+	case strings.Contains(lower, "certificate") || strings.Contains(lower, "x509"):
+		return "Worker cannot verify coordinator TLS certificate. Detail: " + msg
+	case strings.Contains(lower, "connection refused"):
+		return "Coordinator is not accepting connections at the saved address. Check that ForgeGrid is running and the address has not changed. Detail: " + msg
+	case strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded"):
+		return "Network timeout reaching coordinator. Check Wi-Fi, firewall and coordinator address. Detail: " + msg
+	default:
+		return msg
+	}
 }
 
 func (w *Worker) jobLoop() {
+	defer w.loopsDone.Done()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
 	for {
 		w.pollJobs()
-		time.Sleep(2 * time.Second)
+		select {
+		case <-w.stopCh:
+			return
+		case <-ticker.C:
+		}
 	}
 }
 
 func (w *Worker) pollJobs() {
+	validCaps, drift := w.ValidateCapabilities()
+	w.mu.Lock()
+	changed := !sameStringSet(w.Capabilities, validCaps)
+	w.Capabilities = validCaps
+	w.mu.Unlock()
+	if len(drift) > 0 {
+		log.Printf("Capability drift detected: %v are configured but missing from PATH", drift)
+	}
+	if changed || len(drift) > 0 {
+		w.sendHeartbeat()
+	}
+	w.pollUpdateRequest()
+
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/jobs?worker_id=%s", w.CoordinatorURL, w.WorkerID), nil)
 	req.Header.Set("Authorization", "Bearer "+w.Token)
 
@@ -322,13 +1141,16 @@ func (w *Worker) pollJobs() {
 
 	var jobs []models.Job
 	if err := json.NewDecoder(resp.Body).Decode(&jobs); err != nil {
+		if err != io.EOF {
+			log.Printf("[Worker %s] Failed to decode jobs response: %v", w.WorkerID, err)
+		}
 		return
 	}
 
 	for _, job := range jobs {
-		if job.Status == "cancelled" {
+		if job.Status == models.StatusCancelRequested {
 			w.cancelJob(job.ID)
-		} else if job.Status == "pending" {
+		} else if job.Status == models.StatusPending {
 			w.mu.Lock()
 			if w.activeJobs == nil {
 				w.activeJobs = make(map[string]context.CancelFunc)
@@ -336,7 +1158,12 @@ func (w *Worker) pollJobs() {
 			_, active := w.activeJobs[job.ID]
 			w.mu.Unlock()
 			if !active {
-				go w.executeJob(job)
+				// Try to claim
+				attemptID, ok := w.claimJob(job.ID)
+				if ok {
+					job.AttemptID = attemptID
+					go w.executeJob(job)
+				}
 			}
 		}
 	}
@@ -351,29 +1178,724 @@ func (w *Worker) cancelJob(jobID string) {
 	}
 }
 
-func (w *Worker) updateJobStatus(jobID, attemptID, status, result string, logs []string) {
+func (w *Worker) claimJob(jobID string) (string, bool) {
 	reqBody := map[string]interface{}{
-		"attempt_id": attemptID,
-		"status":     status,
-		"result":     result,
-		"logs":       logs,
+		"worker_id": w.WorkerID,
 	}
 	body, _ := json.Marshal(reqBody)
-	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/jobs/%s", w.CoordinatorURL, jobID), bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/jobs/%s/claim", w.CoordinatorURL, jobID), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+w.Token)
 	resp, err := w.Client.Do(req)
-	if err == nil {
-		resp.Body.Close()
+	if err != nil {
+		return "", false
 	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errRes map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&errRes)
+		return "", false
+	}
+
+	var job models.Job
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		return "", false
+	}
+	return job.AttemptID, true
+}
+
+func (w *Worker) updateJobStatus(jobID, attemptID string, status models.JobStatus, result string, logs []byte, seq int) {
+	w.updateJobStatusWithMetadata(jobID, attemptID, status, result, logs, seq, nil, "", "", nil, 0)
+}
+
+func (w *Worker) updateJobStatusWithMetadata(jobID, attemptID string, status models.JobStatus, result string, logs []byte, seq int, artifacts []models.Artifact, pushedBranch, prURL string, stages []models.JobStage, currentStage int) {
+	reqBody := map[string]interface{}{
+		"attempt_id":    attemptID,
+		"status":        status,
+		"result":        result,
+		"logs":          logs,
+		"log_seq":       seq,
+		"artifacts":     artifacts,
+		"pushed_branch": pushedBranch,
+		"pr_url":        prURL,
+	}
+	if stages != nil {
+		reqBody["stages"] = stages
+		reqBody["current_stage"] = currentStage
+	}
+	addJobResultMetadata(reqBody, jobResultMetadata{})
+	w.postJobUpdate(jobID, reqBody)
+}
+
+type jobResultMetadata struct {
+	FailureCode       string
+	BaseBranch        string
+	ResolvedBase      string
+	WorkBranch        string
+	CommitSHA         string
+	WorkspaceID       string
+	WorkspaceRetained bool
+	ChangedFiles      []models.ChangedFile
+	ValidationResults []models.ValidationResult
+	AgentActual       string
+}
+
+func (w *Worker) updateJobStatusFull(jobID, attemptID string, status models.JobStatus, result string, logs []byte, seq int, artifacts []models.Artifact, pushedBranch, prURL string, stages []models.JobStage, currentStage int, meta jobResultMetadata) {
+	reqBody := map[string]interface{}{
+		"attempt_id":    attemptID,
+		"status":        status,
+		"result":        result,
+		"logs":          logs,
+		"log_seq":       seq,
+		"artifacts":     artifacts,
+		"pushed_branch": pushedBranch,
+		"pr_url":        prURL,
+	}
+	if stages != nil {
+		reqBody["stages"] = stages
+		reqBody["current_stage"] = currentStage
+	}
+	addJobResultMetadata(reqBody, meta)
+	w.postJobUpdate(jobID, reqBody)
+}
+
+func addJobResultMetadata(reqBody map[string]interface{}, meta jobResultMetadata) {
+	if meta.FailureCode != "" {
+		reqBody["failure_code"] = meta.FailureCode
+	}
+	if meta.BaseBranch != "" {
+		reqBody["base_branch"] = meta.BaseBranch
+	}
+	if meta.ResolvedBase != "" {
+		reqBody["resolved_base"] = meta.ResolvedBase
+	}
+	if meta.WorkBranch != "" {
+		reqBody["work_branch"] = meta.WorkBranch
+	}
+	if meta.CommitSHA != "" {
+		reqBody["commit_sha"] = meta.CommitSHA
+	}
+	if meta.WorkspaceID != "" {
+		reqBody["workspace_id"] = meta.WorkspaceID
+	}
+	if meta.WorkspaceRetained {
+		reqBody["workspace_retained"] = true
+	}
+	if meta.ChangedFiles != nil {
+		reqBody["changed_files"] = meta.ChangedFiles
+	}
+	if meta.ValidationResults != nil {
+		reqBody["validation_results"] = meta.ValidationResults
+	}
+	if meta.AgentActual != "" {
+		reqBody["agent_actual"] = meta.AgentActual
+	}
+}
+
+var jobUpdateBackoff = []time.Duration{0, 500 * time.Millisecond, time.Second}
+
+// terminalJobStatuses are the job statuses worth durably retrying: once
+// the coordinator accepts one of these, its view of the job is final and
+// nothing will ever report it again on its own. Mirrors
+// terminalUpdateStatuses for update-transaction reports.
+var terminalJobStatuses = map[string]bool{
+	string(models.StatusCompleted): true,
+	string(models.StatusFailed):    true,
+	string(models.StatusCancelled): true,
+}
+
+func pendingJobReportDir() string {
+	return filepath.Join(getWorkerDataDir(), "pending_job_reports")
+}
+
+type pendingJobReport struct {
+	JobID string                 `json:"job_id"`
+	Body  map[string]interface{} `json:"body"`
+}
+
+// postJobUpdate reports job status/results to the coordinator. A lost
+// mid-job progress report is harmless - the next one supersedes it - but
+// losing the single terminal report (completed/failed/cancelled) used to
+// mean the worker moved on believing the job was done while the
+// coordinator's record stayed stuck "running" forever, with nothing else
+// ever going to correct it. This now checks the response, retries a
+// bounded number of times with a short backoff, and - for a terminal
+// status specifically - persists an unacknowledged report to disk so
+// retryPendingJobReports (called from the ordinary heartbeat loop) keeps
+// retrying it after process restarts too, exactly mirroring reportUpdate's
+// already-hardened pattern for update-transaction reports.
+func (w *Worker) postJobUpdate(jobID string, reqBody map[string]interface{}) {
+	rep := pendingJobReport{JobID: jobID, Body: reqBody}
+
+	acked := false
+	for _, delay := range jobUpdateBackoff {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		if w.sendJobUpdateOnce(rep) {
+			acked = true
+			break
+		}
+	}
+
+	if acked {
+		w.clearPendingJobReportIfMatches(jobID)
+		return
+	}
+
+	if isTerminalJobReport(reqBody) {
+		log.Printf("[Job] Could not deliver terminal report for %s after retries; will keep retrying from the heartbeat loop", jobID)
+		if err := writePendingJobReport(rep); err != nil {
+			log.Printf("[Job] Could not persist pending report for later retry: %v", err)
+		}
+	}
+}
+
+func isTerminalJobReport(reqBody map[string]interface{}) bool {
+	status, ok := reqBody["status"]
+	if !ok {
+		return false
+	}
+	return terminalJobStatuses[fmt.Sprint(status)]
+}
+
+// sendJobUpdateOnce makes exactly one attempt and reports whether the
+// coordinator acknowledged it (2xx). A 404 (job deleted/coordinator
+// reset) or 409 (job already in a terminal state, or an attempt-ID
+// mismatch after a coordinator reset) are both treated as acknowledged
+// for retry purposes: the coordinator's state has already moved on
+// without this report, so there is nothing left to deliver it to -
+// mirroring the update-report path's existing 404-as-superseded
+// convention.
+func (w *Worker) sendJobUpdateOnce(rep pendingJobReport) bool {
+	body, err := json.Marshal(rep.Body)
+	if err != nil {
+		return false
+	}
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/api/jobs/%s", w.CoordinatorURL, rep.JobID), bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+w.Token)
+	resp, err := w.Client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusConflict {
+		return true
+	}
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func writePendingJobReport(rep pendingJobReport) error {
+	dir := pendingJobReportDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(rep)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, rep.JobID+"_"+generateRandomID()+".json")
+	return os.WriteFile(path, b, 0600)
+}
+
+func (w *Worker) clearPendingJobReportIfMatches(jobID string) {
+	dir := pendingJobReportDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), jobID+"_") {
+			os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
+}
+
+// retryPendingJobReports redelivers any terminal job reports that failed
+// to reach the coordinator even after postJobUpdate's own immediate
+// retries, including ones persisted before a crash/restart. Uses its own
+// mutex (not reportDrainMu) so job-report and update-report draining never
+// contend with each other on the same heartbeat tick.
+func (w *Worker) retryPendingJobReports() {
+	if !w.jobReportDrainMu.TryLock() {
+		return
+	}
+	defer w.jobReportDrainMu.Unlock()
+
+	dir := pendingJobReportDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rep pendingJobReport
+		if err := json.Unmarshal(b, &rep); err == nil {
+			if w.sendJobUpdateOnce(rep) {
+				os.Remove(path)
+			}
+		} else {
+			os.Remove(path)
+		}
+	}
+}
+
+func (w *Worker) pollUpdateRequest() {
+	w.mu.Lock()
+	active := len(w.activeJobs)
+	w.mu.Unlock()
+	if active > 0 {
+		return
+	}
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/updates/worker?worker_id=%s", w.CoordinatorURL, w.WorkerID), nil)
+	req.Header.Set("Authorization", "Bearer "+w.Token)
+	resp, err := w.Client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+	var body struct {
+		Update *fgupdate.Request `json:"update"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || body.Update == nil {
+		return
+	}
+	if !w.tryBeginUpdate(body.Update.ID) {
+		return
+	}
+	go w.stageUpdate(*body.Update)
+}
+
+// terminalUpdateStatuses are the statuses worth durably retrying: once one
+// of these is accepted, the coordinator's view of this update request is
+// final and nothing will report it again on its own.
+var terminalUpdateStatuses = map[string]bool{
+	"completed":       true,
+	"failed":          true,
+	"rolled_back":     true,
+	"rollback_failed": true,
+}
+
+func pendingReportDir() string {
+	return filepath.Join(getWorkerDataDir(), "pending_reports")
+}
+
+type pendingUpdateReport struct {
+	WorkerID      string `json:"worker_id"`
+	UpdateID      string `json:"update_id"`
+	Status        string `json:"status"`
+	Message       string `json:"message"`
+	RollbackReady bool   `json:"rollback_ready"`
+}
+
+// reportUpdate tells the coordinator about this update's status. A fire-
+// and-forget POST here previously meant that if the single terminal report
+// (completed/failed/rolled_back/rollback_failed) was lost to a transport
+// error or a non-2xx response, the worker would go on running perfectly
+// healthy while the coordinator's /api/updates/status stayed stuck showing
+// "running"/"queued" forever - nothing else was ever going to tell it
+// otherwise. This now checks the HTTP response, retries a bounded number
+// of times with a short backoff (small enough to never meaningfully block
+// worker startup, since this is on that path via verifyUpdateTransaction),
+// and - for a terminal status specifically - persists an unacknowledged
+// report to disk so retryPendingUpdateReport (called from the ordinary
+// heartbeat loop, which already runs continuously) keeps retrying it after
+// process restarts too, until the coordinator actually acknowledges it.
+// The coordinator's handleWorkerUpdateReport just overwrites the same
+// fields on a resend, so duplicate delivery is safe.
+func (w *Worker) reportUpdate(updateID, status, message string, rollbackReady bool) bool {
+	rep := pendingUpdateReport{
+		WorkerID:      w.WorkerID,
+		UpdateID:      updateID,
+		Status:        status,
+		Message:       message,
+		RollbackReady: rollbackReady,
+	}
+
+	backoff := []time.Duration{0, 500 * time.Millisecond, time.Second}
+	acked := false
+	for _, delay := range backoff {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		if w.sendUpdateReportOnce(rep) {
+			acked = true
+			break
+		}
+	}
+
+	if acked {
+		w.clearPendingUpdateReportIfMatches(updateID)
+		return true
+	}
+
+	if terminalUpdateStatuses[status] {
+		log.Printf("[Update] Could not deliver terminal report %q for %s after retries; will keep retrying from the heartbeat loop", status, updateID)
+		if err := writePendingUpdateReport(rep); err != nil {
+			log.Printf("[Update] Could not persist pending report for later retry: %v", err)
+		}
+	}
+	return false
+}
+
+func writePendingUpdateReport(rep pendingUpdateReport) error {
+	dir := pendingReportDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(rep)
+	if err != nil {
+		return err
+	}
+	// Use UpdateID as prefix for easy clearance later, append random ID for uniqueness
+	path := filepath.Join(dir, rep.UpdateID+"_"+generateRandomID()+".json")
+	return os.WriteFile(path, b, 0600)
+}
+
+// sendUpdateReportOnce makes exactly one attempt and reports whether the
+// coordinator acknowledged it (2xx). A 404 (update request superseded by a
+// newer one, or worker/coordinator state reset) is treated the same as
+// success for the caller's retry purposes: there is nothing left to
+// deliver this report to.
+func (w *Worker) sendUpdateReportOnce(rep pendingUpdateReport) bool {
+	body, _ := json.Marshal(rep)
+	req, err := http.NewRequest("POST", w.CoordinatorURL+"/api/updates/report", bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+w.Token)
+	resp, err := w.Client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return true
+	}
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func (w *Worker) clearPendingUpdateReportIfMatches(updateID string) {
+	dir := pendingReportDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), updateID+"_") {
+			os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
+}
+
+// readPendingUpdateReport has been removed in favor of durable queues
+
+// retryPendingUpdateReport is called once per heartbeat tick (every 5s,
+// configurable in tests). It ensures that a terminal report which failed
+// retries still eventually reaches the coordinator once connectivity
+// recovers, without anything having to block waiting for that to happen.
+func (w *Worker) retryPendingUpdateReport() {
+	if !w.reportDrainMu.TryLock() {
+		return // Another drain is already in progress
+	}
+	defer w.reportDrainMu.Unlock()
+
+	dir := pendingReportDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rep pendingUpdateReport
+		if err := json.Unmarshal(b, &rep); err == nil {
+			if w.sendUpdateReportOnce(rep) {
+				os.Remove(path)
+			}
+		} else {
+			// Remove corrupted files
+			os.Remove(path)
+		}
+	}
+}
+
+func (w *Worker) stageUpdate(req fgupdate.Request) {
+	// os.Exit(0) below (on the success path) skips deferred calls, which is
+	// correct here: the process is being replaced, so there is nothing left
+	// to release the claim for. Every failure path returns normally instead
+	// of exiting, so this defer is what frees the id for a future retry.
+	defer w.endUpdate(req.ID)
+
+	w.mu.Lock()
+	if len(w.activeJobs) > 0 {
+		w.mu.Unlock()
+		return
+	}
+	w.mu.Unlock()
+	w.reportUpdate(req.ID, "running", "Staging update package", false)
+
+	updateDir := filepath.Join(getWorkerDataDir(), "updates", req.ID)
+	if err := os.MkdirAll(updateDir, 0700); err != nil {
+		w.reportUpdate(req.ID, "failed", "Could not create update staging folder: "+err.Error(), false)
+		return
+	}
+
+	source, err := w.resolveUpdateSource(req, updateDir)
+	if err != nil {
+		w.reportUpdate(req.ID, "failed", err.Error(), false)
+		return
+	}
+	if err := fgupdate.VerifyFile(source, req.Artifact.SHA256); err != nil {
+		w.reportUpdate(req.ID, "failed", "Update package failed checksum verification: "+err.Error(), false)
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		w.reportUpdate(req.ID, "failed", "Could not locate running ForgeGrid executable: "+err.Error(), false)
+		return
+	}
+	rollbackPath := filepath.Join(updateDir, "rollback-"+filepath.Base(exe))
+	stagedPath := stagedArtifactPath(updateDir, source)
+	if err := copyFile(exe, rollbackPath, 0700); err != nil {
+		w.reportUpdate(req.ID, "failed", "Could not prepare rollback copy: "+err.Error(), false)
+		return
+	}
+	if err := copyFile(source, stagedPath, 0700); err != nil {
+		w.reportUpdate(req.ID, "failed", "Could not stage update package: "+err.Error(), true)
+		return
+	}
+	if err := fgupdate.VerifyFile(stagedPath, req.Artifact.SHA256); err != nil {
+		w.reportUpdate(req.ID, "failed", "Staged update failed checksum verification: "+err.Error(), true)
+		return
+	}
+
+	_ = os.Chmod(stagedPath, 0755)
+
+	log.Printf("[Update] Candidate staged")
+
+	// Prepare updater helper
+	updaterPath := filepath.Join(updateDir, "updater-helper-"+filepath.Base(exe))
+	if err := copyFile(exe, updaterPath, 0755); err != nil {
+		w.reportUpdate(req.ID, "failed", "Could not copy updater helper: "+err.Error(), false)
+		return
+	}
+
+	tx := &UpdateTransaction{
+		ID:                req.ID,
+		WorkerID:          w.WorkerID,
+		OldBinaryPath:     exe,
+		NewBinaryPath:     stagedPath,
+		BackupBinaryPath:  filepath.Join(filepath.Dir(exe), "previous-"+filepath.Base(exe)),
+		UpdaterHelperPath: updaterPath,
+		ExpectedSHA256:    req.Artifact.SHA256,
+		CurrentState:      "STAGED",
+		StartedAt:         time.Now(),
+		RestartDeadline:   time.Now().Add(60 * time.Second),
+		WorkerPID:         os.Getpid(),
+		LifecycleMode:     DetectCurrentLifecycle(),
+	}
+
+	// Prepare rollback backup
+	if err := copyFile(exe, tx.BackupBinaryPath, 0755); err != nil {
+		w.reportUpdate(req.ID, "failed", "Could not create backup: "+err.Error(), false)
+		return
+	}
+
+	if oldHash, err := fileSHA256(exe); err == nil {
+		tx.OldSHA256 = oldHash
+	}
+
+	if err := writeTx(tx); err != nil {
+		w.reportUpdate(req.ID, "failed", "Could not write transaction: "+err.Error(), false)
+		return
+	}
+
+	log.Printf("[Update] Launching update helper")
+	if err := launchUpdaterHelper(updaterPath); err != nil {
+		w.reportUpdate(req.ID, "failed", "Could not launch updater: "+err.Error(), true)
+		return
+	}
+
+	w.reportUpdate(req.ID, "running", "Update staged. Launching updater helper...", false)
+	log.Printf("[Update] Worker exiting for replacement")
+	os.Exit(0)
+}
+
+// filePathFromFileURL corrects a path taken from url.URL.Path for a
+// file:// URI. Go's net/url leaves a leading "/" in front of a Windows
+// drive letter (file:///C:/dev/x -> "/C:/dev/x"), which Windows' path APIs
+// reject outright ("The given path's format is not supported."). Strip
+// that leading slash only when it precedes a drive letter; a genuine
+// Unix path (e.g. "/home/user/x") is left untouched.
+func filePathFromFileURL(p string) string {
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+		if c := p[1]; (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return p[1:]
+		}
+	}
+	return p
+}
+
+// stagedArtifactPath returns the path stageUpdate copies the resolved
+// update source into before its second, final checksum check. It must
+// never equal source: for a downloaded artifact, source is already
+// updateDir/downloaded-<name>, so naively joining updateDir with
+// filepath.Base(source) would reproduce that exact same path, and
+// copyFile(source, stagedPath, ...) opening one path for both reading and
+// O_TRUNC writing at once truncates it to zero bytes before ever reading
+// it - the exact empty-file bug found running the real Laptop03/Laptop04
+// canaries (every real failure said "Staged update failed checksum
+// verification", never "Update package failed", because the download and
+// its own first checksum check always succeeded). The "staged-" prefix is
+// distinct from downloadUpdateArtifact's "downloaded-" prefix and from any
+// bare local-candidate-path filename, so it can never collide with source.
+func stagedArtifactPath(updateDir, source string) string {
+	return filepath.Join(updateDir, "staged-"+filepath.Base(source))
+}
+
+// resolveUpdateSource returns a local, existing file path holding the
+// update artifact's bytes. A manifest artifact reaches the worker as a
+// bundle-relative Path (only meaningful when this worker happens to share
+// a filesystem with the coordinator) or a file:// URL to a path already
+// staged here by some other channel; a genuinely remote worker - every
+// real DadLAN laptop - has neither, so this falls through to downloading
+// the artifact from the coordinator directly over the same authenticated
+// connection already used for polling.
+func (w *Worker) resolveUpdateSource(req fgupdate.Request, updateDir string) (string, error) {
+	if candidate := localCandidatePath(req.Artifact.Path); candidate != "" {
+		return candidate, nil
+	}
+	if strings.HasPrefix(req.Artifact.URL, "file://") {
+		if u, err := url.Parse(req.Artifact.URL); err == nil {
+			if candidate := localCandidatePath(filePathFromFileURL(u.Path)); candidate != "" {
+				return candidate, nil
+			}
+		}
+	}
+	return w.downloadUpdateArtifact(req, updateDir)
+}
+
+// localCandidatePath resolves path to an absolute path and returns it only
+// if a regular file actually exists there. Returning "" (rather than an
+// error) on a missing file lets the caller fall through to downloading the
+// artifact instead of failing outright on a path that only ever made sense
+// on the coordinator's own filesystem.
+func localCandidatePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		return ""
+	}
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		return ""
+	}
+	return path
+}
+
+// downloadUpdateArtifact fetches the queued update's artifact bytes from
+// the coordinator's /api/updates/artifact endpoint, using the same
+// pinned-TLS client and worker bearer token already trusted for polling
+// and reporting, and saves them under updateDir. It uses DownloadClient, not
+// Client: Client's 10s timeout is sized for small poll/report JSON calls
+// and was found (via the real Laptop03 canary) to be too short to reliably
+// pull a multi-MB binary over a real network to a physical machine.
+func (w *Worker) downloadUpdateArtifact(req fgupdate.Request, updateDir string) (string, error) {
+	downloadURL := fmt.Sprintf("%s/api/updates/artifact?worker_id=%s&update_id=%s", w.CoordinatorURL, w.WorkerID, req.ID)
+	httpReq, err := http.NewRequest("GET", downloadURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build update download request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+w.Token)
+	client := w.DownloadClient
+	if client == nil {
+		client = w.Client
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("download update artifact: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download update artifact: coordinator returned %s", resp.Status)
+	}
+	name := filepath.Base(req.Artifact.Path)
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		name = "candidate-" + req.ID
+	}
+	dest := filepath.Join(updateDir, "downloaded-"+name)
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0700)
+	if err != nil {
+		return "", fmt.Errorf("create downloaded artifact file: %w", err)
+	}
+	limitReader := io.LimitReader(resp.Body, artifactDownloadLimit)
+	if _, err := io.Copy(out, limitReader); err != nil {
+		out.Close()
+		return "", fmt.Errorf("save downloaded artifact: %w", err)
+	}
+
+	var buf [1]byte
+	if n, _ := resp.Body.Read(buf[:]); n > 0 {
+		out.Close()
+		os.Remove(dest)
+		return "", fmt.Errorf("download update artifact: size exceeds %d bytes limit", artifactDownloadLimit)
+	}
+
+	if err := out.Close(); err != nil {
+		return "", fmt.Errorf("save downloaded artifact: %w", err)
+	}
+	return dest, nil
+}
+
+func copyFile(src, dst string, perm os.FileMode) error {
+	// Defense in depth against the exact bug found running the real
+	// Laptop03/Laptop04 canaries: opening the same path for reading and for
+	// O_TRUNC writing truncates it to zero bytes before it's ever read,
+	// silently producing an empty destination file with no error at all.
+	if filepath.Clean(src) == filepath.Clean(dst) {
+		return fmt.Errorf("copyFile: source and destination are the same path (%s); refusing to truncate it in place", src)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func (w *Worker) executeJob(job models.Job) {
 	fmt.Println("Starting job:", job.ID)
-
-	if job.AttemptID == "" {
-		job.AttemptID = fmt.Sprintf("attempt-%d", time.Now().UnixNano())
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -393,68 +1915,527 @@ func (w *Worker) executeJob(job models.Job) {
 
 	hw, _ := w.getHardwareInfo()
 
-	w.updateJobStatus(job.ID, job.AttemptID, "running", "", []string{
-		fmt.Sprintf("Job started on %s (ID: %s)", w.NodeName, w.WorkerID),
-		fmt.Sprintf("OS: %s | CPU: %s", hw.OS, hw.CPUModel),
-		fmt.Sprintf("PID: %d", os.Getpid()),
-	})
+	logSeq := 1
+	startLogs := []byte(fmt.Sprintf("Job started on %s (ID: %s)\nOS: %s | CPU: %s\nPID: %d\n", w.NodeName, w.WorkerID, hw.OS, hw.CPUModel, os.Getpid()))
+	w.updateJobStatus(job.ID, job.AttemptID, models.StatusRunning, "", startLogs, logSeq)
+	logSeq++
 
 	if job.Task == "test" {
-		logs := []string{
-			fmt.Sprintf("Received challenge: %s", job.Challenge),
-		}
-
+		logs := []byte(fmt.Sprintf("Received challenge: %s\n", job.Challenge))
 		h := sha256.Sum256([]byte(job.Challenge))
 		result := hex.EncodeToString(h[:])
+		logs = append(logs, []byte(fmt.Sprintf("Calculated SHA-256: %s\n", result))...)
+		w.updateJobStatus(job.ID, job.AttemptID, models.StatusCompleted, result, logs, logSeq)
+	} else if job.Task == "compute.test" {
+		inputStr := job.Parameters["input"]
+		input, _ := strconv.Atoi(inputStr)
+		start := time.Now()
 
-		logs = append(logs, fmt.Sprintf("Calculated SHA-256: %s", result))
-
-		w.updateJobStatus(job.ID, job.AttemptID, "completed", result, logs)
-	} else if job.Task == "execute" {
-		profile, err := execution.GetProfile(job.Profile)
-		if err != nil {
-			w.updateJobStatus(job.ID, job.AttemptID, "failed", err.Error(), []string{err.Error()})
-			return
-		}
-
-		workDir, err := execution.SecureWorkspacePath(w.Workspace, ".")
-		if err != nil {
-			w.updateJobStatus(job.ID, job.AttemptID, "failed", "workspace error", []string{err.Error()})
-			return
-		}
-
-		timeout := time.Duration(job.TimeoutSeconds) * time.Second
-		if timeout == 0 {
-			timeout = 5 * time.Minute
-		}
-
-		execCtx, execCancel := context.WithTimeout(ctx, timeout)
-		defer execCancel()
-
-		executor := execution.NewExecutor()
-		res := executor.Run(execCtx, profile, job.Args, job.Env, workDir)
-
-		finalStatus := "completed"
-		if res.ExitCode != 0 || res.Error != nil {
-			if execCtx.Err() == context.DeadlineExceeded {
-				finalStatus = "failed"
-				res.Logs = append(res.Logs, "Job timed out")
-			} else if ctx.Err() == context.Canceled {
-				finalStatus = "cancelled"
-				res.Logs = append(res.Logs, "Job cancelled by coordinator")
-			} else {
-				finalStatus = "failed"
+		// Deterministic small CPU calculation
+		// e.g. sum of primes up to input
+		sum := 0
+		for i := 2; i <= input; i++ {
+			isPrime := true
+			for j := 2; j*j <= i; j++ {
+				if i%j == 0 {
+					isPrime = false
+					break
+				}
+			}
+			if isPrime {
+				sum += i
 			}
 		}
 
-		resultStr := fmt.Sprintf("ExitCode: %d", res.ExitCode)
-		if res.Error != nil {
-			resultStr += fmt.Sprintf(", Error: %v", res.Error)
+		finish := time.Now()
+		duration := finish.Sub(start)
+
+		resultStr := fmt.Sprintf("Result: %d, Start: %s, Finish: %s, Duration: %s, Worker: %s", sum, start.Format(time.RFC3339), finish.Format(time.RFC3339), duration.String(), w.NodeName)
+		logs := []byte(resultStr + "\n")
+		w.updateJobStatus(job.ID, job.AttemptID, models.StatusCompleted, fmt.Sprintf("%d", sum), logs, logSeq)
+	} else if job.Task == "mandelbrot" {
+		start := time.Now()
+		width, _ := strconv.Atoi(job.Parameters["width"])
+		startY, _ := strconv.Atoi(job.Parameters["startY"])
+		endY, _ := strconv.Atoi(job.Parameters["endY"])
+
+		img := image.NewRGBA(image.Rect(0, 0, width, endY-startY))
+		for py := startY; py < endY; py++ {
+			for px := 0; px < width; px++ {
+				x0 := float64(px)/float64(width)*3.5 - 2.5
+				y0 := float64(py)/1200.0*2.0 - 1.0
+
+				x, y := 0.0, 0.0
+				iteration := 0
+				max_iteration := 1000
+
+				for x*x+y*y <= 2*2 && iteration < max_iteration {
+					xtemp := x*x - y*y + x0
+					y = 2*x*y + y0
+					x = xtemp
+					iteration++
+				}
+
+				c := color.RGBA{0, 0, 0, 255}
+				if iteration < max_iteration {
+					c = color.RGBA{uint8(iteration % 256), uint8((iteration * 5) % 256), uint8((iteration * 10) % 256), 255}
+				}
+				img.Set(px, py-startY, c)
+			}
 		}
 
-		w.updateJobStatus(job.ID, job.AttemptID, finalStatus, resultStr, res.Logs)
+		var buf bytes.Buffer
+		png.Encode(&buf, img)
+		b64 := base64.StdEncoding.EncodeToString(buf.Bytes())
 
+		finish := time.Now()
+		duration := finish.Sub(start)
+
+		resultStr := fmt.Sprintf("Result: Base64PNGFragment, Start: %s, Finish: %s, Duration: %s, Worker: %s", start.Format(time.RFC3339), finish.Format(time.RFC3339), duration.String(), w.NodeName)
+		logs := []byte(resultStr + "\n")
+		w.updateJobStatus(job.ID, job.AttemptID, models.StatusCompleted, b64, logs, logSeq)
+	} else if job.Task == "execute" {
+		var workDir string
+		var gm *gitworkspace.Manager
+		var mainRepoDir string
+		var branchName string
+		var resultMeta jobResultMetadata
+
+		var output []byte
+		var artifacts []models.Artifact
+		var pushedBranch string
+		var prURL string
+		finalResult := "success"
+		finalStatus := models.StatusCompleted
+
+		if job.RepositoryURL != "" {
+			if !w.allowedRepos[job.RepositoryURL] {
+				w.updateJobStatus(job.ID, job.AttemptID, models.StatusFailed, "repository not allowed", []byte("Repository is not in this worker's allowlist. Start the worker with -allowed-repos or FORGEGRID_ALLOWED_REPOS.\n"), logSeq)
+				return
+			}
+			if job.PushChanges && !w.allowPush {
+				w.updateJobStatus(job.ID, job.AttemptID, models.StatusFailed, "push not allowed", []byte("Job requested push_changes, but this worker was not started with -allow-push or FORGEGRID_ALLOW_PUSH=true.\n"), logSeq)
+				return
+			}
+			gm = gitworkspace.NewManager(w.Workspace, gitworkspace.Options{
+				AllowedRepos: w.allowedRepos,
+				AllowPush:    w.allowPush,
+			})
+
+			branchName = job.BranchName
+			if branchName == "" {
+				branchName = "forgegrid-" + job.ID
+			}
+
+			ws, err := gm.PrepareJobWorkspace(job.RepositoryURL, job.BaseCommit, branchName, job.ID)
+			if err != nil {
+				w.updateJobStatus(job.ID, job.AttemptID, models.StatusFailed, "workspace prep error", []byte(err.Error()+"\n"), logSeq)
+				return
+			}
+			workDir = ws.WorkDir
+			mainRepoDir = ws.RepoDir
+			resultMeta.WorkspaceID = ws.ID
+			resultMeta.ResolvedBase = ws.BaseCommit
+			resultMeta.WorkBranch = ws.BranchName
+			output = append(output, []byte(fmt.Sprintf("\n--- GIT WORKSPACE ---\nRepository: %s\nBase: %s\nBranch: %s\nWorkspace: %s\n", job.RepositoryURL, ws.BaseCommit, ws.BranchName, ws.WorkDir))...)
+
+			// Setup cleanup and reporting
+			defer func() {
+				// Attempt push if successful and requested
+				if finalStatus == models.StatusCompleted && job.CommitChanges {
+					changed, changeErr := gm.ChangedFiles(workDir)
+					if changeErr != nil {
+						output = append(output, []byte(fmt.Sprintf("\n--- CHANGE DETECTION FAILED ---\n%v\n", changeErr))...)
+						finalStatus = models.StatusFailed
+						finalResult = "change detection failed"
+						resultMeta.FailureCode = "CHANGE_DETECTION_FAILED"
+					}
+					resultMeta.ChangedFiles = changed
+					if finalStatus == models.StatusCompleted && len(changed) == 0 {
+						finalResult = "no changes"
+						output = append(output, []byte("\n--- GIT CHANGES ---\nNo files changed; nothing to commit.\n")...)
+					}
+					if finalStatus == models.StatusCompleted {
+						blocked := gitworkspace.SecretLikeChangedFiles(changed)
+						if len(blocked) > 0 {
+							output = append(output, []byte("\n--- SECRET GUARD FAILED ---\nForgeGrid refused to commit likely secret files:\n"+strings.Join(blocked, "\n")+"\n")...)
+							finalStatus = models.StatusFailed
+							finalResult = "secret guard failed"
+							resultMeta.FailureCode = "SECRET_GUARD_FAILED"
+							resultMeta.WorkspaceRetained = true
+						}
+					}
+				}
+				if finalStatus == models.StatusCompleted && job.CommitChanges && finalResult != "no changes" {
+					commitMsg := job.CommitMessage
+					if commitMsg == "" {
+						commitMsg = "Automated commit by ForgeGrid worker"
+					}
+					commitResult, pushErr := gm.CommitAndMaybePushDetailed(workDir, job.RepositoryURL, commitMsg, job.PushChanges)
+					if commitResult != nil {
+						resultMeta.CommitSHA = commitResult.CommitSHA
+						output = append(output, []byte("\n--- GIT CHANGES ---\n"+commitResult.Message+"\n")...)
+					}
+					if pushErr != nil {
+						output = append(output, []byte(fmt.Sprintf("\n--- GIT CHANGE FAILED ---\n%v", pushErr))...)
+						finalStatus = models.StatusFailed
+						finalResult = "git change failed"
+						resultMeta.FailureCode = "GIT_CHANGE_FAILED"
+					} else if job.PushChanges {
+						pushedBranch = branchName
+						if job.CreatePR {
+							createdPR, prErr := gm.CreatePullRequest(workDir, job.PRTitle, job.PRBody)
+							if prErr != nil {
+								output = append(output, []byte(fmt.Sprintf("\n--- PR CREATION FAILED ---\n%v", prErr))...)
+							} else {
+								prURL = createdPR
+								output = append(output, []byte("\n--- PULL REQUEST CREATED ---\n"+createdPR+"\n")...)
+							}
+						}
+					}
+				}
+
+				if finalStatus == models.StatusCompleted && len(job.Artefacts) > 0 {
+					collected, artErr := gm.CollectArtifacts(workDir, job.Artefacts)
+					if artErr != nil {
+						output = append(output, []byte(fmt.Sprintf("\n--- ARTIFACT COLLECTION FAILED ---\n%v\n", artErr))...)
+					} else {
+						for _, a := range collected {
+							artifacts = append(artifacts, models.Artifact{
+								Path:          a.Path,
+								Size:          a.Size,
+								SHA256:        a.SHA256,
+								ContentBase64: a.ContentBase64,
+								Packaged:      a.Packaged,
+								PackageName:   a.PackageName,
+							})
+						}
+						output = append(output, []byte(fmt.Sprintf("\n--- ARTIFACTS ---\nCollected %d artifact(s).\n", len(artifacts)))...)
+					}
+				}
+
+				diff, diffErr := gm.ProduceDiff(workDir)
+				if diffErr == nil {
+					output = append(output, []byte("\n--- WORKSPACE STATUS ---\n"+diff)...)
+				}
+				if finalStatus == models.StatusCompleted && job.CommitChanges && !job.PushChanges && finalResult != "no changes" {
+					resultMeta.WorkspaceRetained = true
+					output = append(output, []byte(fmt.Sprintf("\n--- WORKTREE RETAINED ---\nLocal commit kept at %s on branch %s because push is disabled for this job.\n", workDir, branchName))...)
+				}
+				if !resultMeta.WorkspaceRetained {
+					if err := gm.CleanupWorktree(mainRepoDir, workDir, branchName); err != nil {
+						output = append(output, []byte(fmt.Sprintf("\n--- CLEANUP FAILED ---\n%v\n", err))...)
+					}
+				}
+				w.updateJobStatusFull(job.ID, job.AttemptID, finalStatus, finalResult, output, logSeq, artifacts, pushedBranch, prURL, job.Stages, job.CurrentStage, resultMeta)
+			}()
+		} else {
+			var err error
+			workDir, err = execution.SecureWorkspacePath(w.Workspace, ".")
+			if err != nil {
+				w.updateJobStatus(job.ID, job.AttemptID, models.StatusFailed, "workspace error", []byte(err.Error()+"\n"), logSeq)
+				return
+			}
+		}
+
+		if len(job.Stages) == 0 {
+			job.Stages = []models.JobStage{{
+				Profile:        job.Profile,
+				Parameters:     job.Parameters,
+				Tools:          job.Tools,
+				TimeoutSeconds: job.TimeoutSeconds,
+			}}
+		}
+
+		for i, stage := range job.Stages {
+			job.CurrentStage = i
+			stage.Status = models.StatusRunning
+			startedAt := time.Now()
+			stage.StartedAt = &startedAt
+			job.Stages[i] = stage
+			output = append(output, []byte(fmt.Sprintf("\n--- STAGE %d: %s ---\n", i+1, stage.Name))...)
+			w.updateJobStatusWithMetadata(job.ID, job.AttemptID, models.StatusRunning, "", output, logSeq, nil, "", "", job.Stages, job.CurrentStage)
+			logSeq++
+
+			isAgentTask := stage.Profile == "ai"
+			var profile execution.Profile
+			var err error
+
+			if !isAgentTask {
+				profile, err = execution.GetProfile(stage.Profile)
+				if err != nil {
+					stage.Status = models.StatusFailed
+					stage.Result = err.Error()
+					job.Stages[i] = stage
+					finalResult = fmt.Sprintf("stage %d error: %v", i+1, err)
+					finalStatus = models.StatusFailed
+					break
+				}
+			}
+			if !isAgentTask && profile.Name == "BootstrapEnvironment" && !w.allowBootstrap {
+				errStr := "worker not allowed to bootstrap environment. start worker with FORGEGRID_ALLOW_BOOTSTRAP=true"
+				stage.Status = models.StatusFailed
+				stage.Result = errStr
+				job.Stages[i] = stage
+				finalResult = "bootstrap forbidden"
+				finalStatus = models.StatusFailed
+				break
+			}
+
+			timeoutSeconds := stage.TimeoutSeconds
+			if !isAgentTask && (timeoutSeconds == 0 || timeoutSeconds > profile.MaxTimeoutSecs) {
+				timeoutSeconds = profile.MaxTimeoutSecs
+			}
+			if isAgentTask && timeoutSeconds == 0 {
+				timeoutSeconds = 3600 // Default 1 hour for agents
+			}
+			timeout := time.Duration(timeoutSeconds) * time.Second
+
+			execCtx, execCancel := context.WithTimeout(ctx, timeout)
+
+			var stageOut []byte
+			if isAgentTask {
+				// Handle agent provider execution
+				agentID := job.AgentRequested
+				if agentID == "" || agentID == "auto" {
+					// Fallback to auto selection based on capabilities if not chosen
+					agentID = w.chooseAutoAgent()
+				}
+				job.AgentActual = agentID
+				resultMeta.AgentActual = agentID
+
+				provider, err := agent.GetProvider(agentID)
+				if err != nil {
+					finalResult = "agent not found"
+					finalStatus = models.StatusFailed
+					stage.Status = models.StatusFailed
+					stage.Result = err.Error()
+					output = append(output, []byte(fmt.Sprintf("\nProvider error: %v", err))...)
+					job.Stages[i] = stage
+					execCancel()
+					break
+				}
+
+				req := agent.AgentRequest{
+					Task:               job.Task,
+					Repository:         job.RepositoryURL,
+					ProjectName:        job.ProjectName,
+					Workspace:          workDir,
+					BaseBranch:         job.BaseBranch,
+					BaseSHA:            job.BaseCommit,
+					WorkBranch:         branchName,
+					SafetyInstructions: agent.StandardSafetyInstructions(),
+				}
+
+				if stage.Parameters["prompt"] != "" {
+					req.Task = stage.Parameters["prompt"]
+				} else if job.Description != "" {
+					req.Task = job.Description
+				}
+
+				inv, err := provider.BuildInvocation(req)
+				if err != nil {
+					finalResult = "invocation error"
+					finalStatus = models.StatusFailed
+					stage.Status = models.StatusFailed
+					stage.Result = err.Error()
+					output = append(output, []byte(fmt.Sprintf("\nInvocation error: %v", err))...)
+					job.Stages[i] = stage
+					execCancel()
+					break
+				}
+
+				cmd := exec.CommandContext(execCtx, inv.Executable, inv.Args...)
+				cmd.Dir = workDir
+
+				// Standard environment mapping
+				cmd.Env = os.Environ()
+
+				var outBytes, errBytes bytes.Buffer
+				cmd.Stdout = &outBytes
+				cmd.Stderr = &errBytes
+
+				started := time.Now()
+				err = cmd.Run()
+				ended := time.Now()
+
+				execResult := agent.ExecutionResult{
+					ExitCode: cmd.ProcessState.ExitCode(),
+					Duration: ended.Sub(started),
+					Stdout:   outBytes.Bytes(),
+					Stderr:   errBytes.Bytes(),
+					Error:    err,
+				}
+
+				agentResult := provider.InterpretResult(execResult)
+
+				stageOut = append(stageOut, outBytes.Bytes()...)
+				stageOut = append(stageOut, errBytes.Bytes()...)
+				stageOut = append(stageOut, []byte(fmt.Sprintf("\n[%s] %s\n", provider.DisplayName(), agentResult.Message))...)
+
+				if agentResult.Status != "COMPLETED" {
+					err = fmt.Errorf("%s", agentResult.Message)
+				}
+			} else {
+				executor := execution.NewExecutor()
+				stageOut, err = executor.Execute(execCtx, profile, stage.Parameters, stage.Tools, workDir)
+			}
+			output = append(output, stageOut...)
+
+			if err != nil {
+				if execCtx.Err() == context.DeadlineExceeded {
+					finalResult = fmt.Sprintf("stage %d timeout", i+1)
+					finalStatus = models.StatusFailed
+					stage.Status = models.StatusFailed
+					stage.Result = "timeout"
+					output = append(output, []byte(fmt.Sprintf("\nStage %d timed out", i+1))...)
+				} else if ctx.Err() == context.Canceled {
+					finalResult = "cancelled"
+					finalStatus = models.StatusCancelled
+					stage.Status = models.StatusFailed
+					stage.Result = "cancelled"
+					output = append(output, []byte("\nJob cancelled by coordinator")...)
+				} else {
+					finalResult = fmt.Sprintf("stage %d error: %v", i+1, err)
+					finalStatus = models.StatusFailed
+					stage.Status = models.StatusFailed
+					stage.Result = err.Error()
+				}
+				endedAt := time.Now()
+				stage.EndedAt = &endedAt
+				stage.Duration = endedAt.Sub(startedAt).Round(time.Millisecond).String()
+				job.Stages[i] = stage
+				execCancel()
+				break
+			}
+
+			endedAt := time.Now()
+			stage.Status = models.StatusCompleted
+			stage.EndedAt = &endedAt
+			stage.Duration = endedAt.Sub(startedAt).Round(time.Millisecond).String()
+			job.Stages[i] = stage
+			execCancel()
+		}
+
+		if finalStatus == models.StatusCompleted && gm != nil && job.CommitChanges {
+			validations := runAutoValidation(ctx, workDir, job.RequiredCaps)
+			resultMeta.ValidationResults = validations
+			for _, validation := range validations {
+				output = append(output, []byte(fmt.Sprintf("\n--- VALIDATION: %s ---\n%s\n", validation.Name, validation.Output))...)
+				if validation.Status != models.StatusCompleted {
+					finalStatus = models.StatusFailed
+					finalResult = "validation failed"
+					resultMeta.FailureCode = "VALIDATION_FAILED"
+					resultMeta.WorkspaceRetained = true
+				}
+			}
+		}
+
+		if gm == nil {
+			w.updateJobStatusFull(job.ID, job.AttemptID, finalStatus, finalResult, output, logSeq, nil, "", "", job.Stages, job.CurrentStage, resultMeta)
+		}
 	} else {
-		w.updateJobStatus(job.ID, job.AttemptID, "failed", "unknown task", []string{"Unsupported task type"})
+		w.updateJobStatus(job.ID, job.AttemptID, models.StatusFailed, "unknown task", []byte("Unsupported task type\n"), logSeq)
 	}
+}
+
+func runAutoValidation(ctx context.Context, workDir string, requiredCaps []string) []models.ValidationResult {
+	var validations []models.ValidationResult
+	caps := make(map[string]bool)
+	for _, cap := range requiredCaps {
+		caps[strings.ToLower(strings.TrimSpace(cap))] = true
+	}
+	add := func(name string, args ...string) {
+		if len(args) == 0 {
+			return
+		}
+		start := time.Now()
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+		cmd.Dir = workDir
+		out, err := cmd.CombinedOutput()
+		end := time.Now()
+		status := models.StatusCompleted
+		if err != nil {
+			status = models.StatusFailed
+			out = append(out, []byte(fmt.Sprintf("\n%v", err))...)
+		}
+		validations = append(validations, models.ValidationResult{
+			Name:      name,
+			Status:    status,
+			Output:    string(out),
+			StartedAt: start,
+			EndedAt:   end,
+			Duration:  end.Sub(start).Round(time.Millisecond).String(),
+		})
+	}
+	if caps["go"] && fileExists(filepath.Join(workDir, "go.mod")) {
+		add("Go tests", "go", "test", "./...")
+	}
+	if caps["python"] || caps["python3"] {
+		if fileExists(filepath.Join(workDir, "pyproject.toml")) || fileExists(filepath.Join(workDir, "requirements.txt")) || dirExists(filepath.Join(workDir, "tests")) {
+			python := "python"
+			if _, err := exec.LookPath(python); err != nil {
+				python = "python3"
+			}
+			add("Python compile", python, "-m", "compileall", "-q", ".")
+			if dirExists(filepath.Join(workDir, "tests")) {
+				add("Python unittest", python, "-m", "unittest", "discover")
+			}
+		}
+	}
+	if caps["node"] && fileExists(filepath.Join(workDir, "package.json")) {
+		if packageScriptExists(filepath.Join(workDir, "package.json"), "test") {
+			add("Node tests", "npm", "test")
+		}
+		if packageScriptExists(filepath.Join(workDir, "package.json"), "build") {
+			add("Node build", "npm", "run", "build")
+		}
+	}
+	return validations
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func packageScriptExists(path, script string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal(b, &pkg); err != nil {
+		return false
+	}
+	return strings.TrimSpace(pkg.Scripts[script]) != ""
+}
+
+func (w *Worker) chooseAutoAgent() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// Deterministic policy: Antigravity > Codex
+	var hasAntigravity, hasCodex bool
+	for _, cap := range w.Capabilities {
+		if cap == "agent:antigravity" {
+			hasAntigravity = true
+		}
+		if cap == "agent:codex" {
+			hasCodex = true
+		}
+	}
+	if hasAntigravity {
+		return "antigravity"
+	}
+	if hasCodex {
+		return "codex"
+	}
+	return "fake" // Fallback for tests
 }
