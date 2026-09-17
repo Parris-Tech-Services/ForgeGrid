@@ -1,6 +1,6 @@
 # ForgeGrid bring-forward run — current handoff
 
-Updated 2026-09-17 after normal compute activation. Claude has stopped; Codex is now the primary implementer. Ten ForgeGrid workers are online after an idempotent existing-service start; Laptop08 failed the Action1 action and Laptop11 has no ForgeGrid registration. No updater, credential, destructive, or fault-injection action was performed.
+Updated 2026-09-17 after worker recovery. Claude has stopped; Codex is now the primary implementer. Eleven ForgeGrid workers are online after safe existing-service starts; Laptop11 has no installed worker binary/service. No updater, credential, destructive, or fault-injection action was performed.
 
 ## Current verified state
 
@@ -40,7 +40,7 @@ The Qwen branch brings forward the persistent-history lineage through merge `338
 
 ## Next action
 
-Diagnose Laptop08 and Laptop11 worker connectivity, then add immutable-SHA distributed validation jobs; continue Phase 9 provider/UI wiring and Phase 7 mobile work on the Qwen branch, merge each completed branch head into `integration/next`, rerun the full suite and cross-compiles, and stop at Checkpoint A before updater/fault actions with exact immutable SHAs for independent review.
+Prepare a reviewed worker bootstrap for Laptop11, then add immutable-SHA distributed validation jobs; continue Phase 9 provider/UI wiring and Phase 7 mobile work on the Qwen branch, merge each completed branch head into `integration/next`, rerun the full suite and cross-compiles, and stop at Checkpoint A before updater/fault actions with exact immutable SHAs for independent review.
 
 ## Hard boundaries
 
