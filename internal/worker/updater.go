@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"forgegrid/internal/network"
@@ -387,6 +388,11 @@ var claimLeaseStaleAfter = 45 * time.Second
 // steal once claimIsLive reports false).
 var stealPollInterval = 2 * time.Second
 
+// The filesystem lease is the authority across processes. This mutex closes
+// the smaller same-process hand-off window between lease release and the
+// waiting caller's next completion check.
+var restartLeaseProcessMu sync.Mutex
+
 func leasePath(claimPath string) string {
 	return claimPath + ".lease"
 }
@@ -439,11 +445,73 @@ func startLeaseKeeper(claimPath string) (stop func()) {
 // crashed mid-operation. A missing lease - the owner crashed before ever
 // writing one, or it was already cleaned up - is never live.
 func claimIsLive(claimPath string) bool {
-	info, err := os.Stat(leasePath(claimPath))
+	lease := leasePath(claimPath)
+	info, err := os.Stat(lease)
+	if err != nil {
+		// Restart leases use an exclusive directory as the lock and keep
+		// their heartbeat in the owner file inside it.
+		info, err = os.Stat(filepath.Join(claimPath, "owner"))
+	}
 	if err != nil {
 		return false
 	}
 	return time.Since(info.ModTime()) <= claimLeaseStaleAfter
+}
+
+// acquireRestartLease atomically claims the shared restart lease. A directory
+// is used as the lock because Mkdir is exclusive across processes, while its
+// modtime provides the existing crash-staleness signal. A stale directory is
+// first renamed away, so an old lease keeper can only refresh the detached
+// path and can never refresh or remove a new owner's directory.
+func acquireRestartLease(claimPath string) (func(), bool) {
+	restartLeaseProcessMu.Lock()
+	owner := filepath.Join(claimPath, "owner")
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := os.Mkdir(claimPath, 0700); err == nil {
+			token := fmt.Sprintf(`{"pid":%d,"id":"%s"}`, os.Getpid(), generateRandomID())
+			if err := os.WriteFile(owner, []byte(token), 0600); err != nil {
+				_ = os.Remove(claimPath)
+				restartLeaseProcessMu.Unlock()
+				return nil, false
+			}
+			interval := claimLeaseInterval
+			done := make(chan struct{})
+			exited := make(chan struct{})
+			go func() {
+				defer close(exited)
+				t := time.NewTicker(interval)
+				defer t.Stop()
+				for {
+					select {
+					case <-done:
+						return
+					case now := <-t.C:
+						_ = os.Chtimes(owner, now, now)
+					}
+				}
+			}()
+			return func() {
+				close(done)
+				<-exited
+				if b, err := os.ReadFile(owner); err == nil && string(b) == token {
+					_ = os.RemoveAll(claimPath)
+				}
+				restartLeaseProcessMu.Unlock()
+			}, true
+		}
+
+		if !claimIsLive(claimPath) {
+			stale := claimPath + ".stale." + generateRandomID()
+			if err := os.Rename(claimPath, stale); err == nil {
+				_ = os.RemoveAll(stale)
+				continue
+			}
+		}
+		restartLeaseProcessMu.Unlock()
+		return nil, false
+	}
+	restartLeaseProcessMu.Unlock()
+	return nil, false
 }
 
 // nonLeaseClaims lists claim files matching pattern, excluding their
@@ -547,7 +615,16 @@ func rollback(tx *UpdateTransaction) {
 
 	// PHASE 2 & 3: WORKER RESTART INTENT & VERIFICATION
 	t2Base = filepath.Join(getWorkerDataDir(), "rollback_restart_"+localTx.ID)
+	var releaseRestartLease func()
 	for {
+		restartVerifiedPath := t2Base + ".verified"
+		if _, err := os.Stat(restartVerifiedPath); err == nil {
+			if releaseRestartLease != nil {
+				releaseRestartLease()
+				releaseRestartLease = nil
+			}
+			return
+		}
 		hasConsumed := false
 		if _, err := os.Stat(t2Base + ".consumed"); err == nil {
 			hasConsumed = true
@@ -582,6 +659,18 @@ func rollback(tx *UpdateTransaction) {
 			}
 
 			if verified {
+				// Publish completion before releasing the lease. Other
+				// rollback callers may have timed out their own observation
+				// window and must have a durable fence that prevents them
+				// from starting the worker a second time.
+				if err := os.WriteFile(restartVerifiedPath, []byte("verified\n"), 0600); err != nil {
+					log.Printf("[Update] Could not persist restart verification fence: %v", err)
+					continue
+				}
+				if releaseRestartLease != nil {
+					releaseRestartLease()
+					releaseRestartLease = nil
+				}
 				log.Printf("[Update] Rollback restart verified.")
 				return
 			}
@@ -595,15 +684,19 @@ func rollback(tx *UpdateTransaction) {
 			// actor is actively mid-restart. The previous actor likely
 			// crashed before or during Start(). Idempotently retry it.
 			log.Printf("[Update] Verification timed out. Retrying restart of previous worker...")
-			stopRestartLease := startLeaseKeeper(restartLeasePath)
+			stopRestartLease, acquired := acquireRestartLease(restartLeasePath)
+			if !acquired {
+				continue
+			}
 			startErr := GetLifecycle(localTx.LifecycleMode).Start(localTx)
-			stopRestartLease()
 			if startErr != nil {
+				stopRestartLease()
 				localTx.CurrentState = "ROLLBACK_FAILED"
 				localTx.RollbackReason = localTx.RollbackReason + " | restart retry failed: " + startErr.Error()
 				logWriteTxErr(localTx, "ROLLBACK_FAILED (restart)")
 				return
 			}
+			releaseRestartLease = stopRestartLease
 			// Loop continues, we will wait another verifyWaitDuration for verification.
 			continue
 		}
@@ -664,16 +757,20 @@ func rollback(tx *UpdateTransaction) {
 			// concurrent actor never piles on a second Start() while
 			// this one is still genuinely in flight.
 			log.Printf("[Update] Restarting previous worker...")
-			stopRestartLease := startLeaseKeeper(restartLeasePath)
+			stopRestartLease, acquired := acquireRestartLease(restartLeasePath)
+			if !acquired {
+				continue
+			}
 			startErr := GetLifecycle(localTx.LifecycleMode).Start(localTx)
-			stopRestartLease()
 			if startErr != nil {
+				stopRestartLease()
 				localTx.CurrentState = "ROLLBACK_FAILED"
 				localTx.RollbackReason = localTx.RollbackReason + " | restart of restored binary failed: " + startErr.Error()
 				logWriteTxErr(localTx, "ROLLBACK_FAILED (restart)")
 				log.Printf("[Update] Rollback FAILED to restart the previous worker: %v", startErr)
 				return
 			}
+			releaseRestartLease = stopRestartLease
 			// Loop continues, which will discover `.consumed` and enter Phase 3 verification.
 			continue
 		}
