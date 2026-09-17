@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"forgegrid/internal/models"
 )
@@ -23,6 +24,8 @@ type Manager struct {
 	AllowedRepos map[string]bool
 	AllowPush    bool
 }
+
+var mirrorMu sync.Mutex
 
 type Options struct {
 	AllowedRepos map[string]bool
@@ -85,6 +88,8 @@ func (m *Manager) PrepareJobWorkspace(repoURL, pinnedBaseCommit, generatedBranch
 	if repoName == "" {
 		repoName = "repo"
 	}
+	repoKey := sha256.Sum256([]byte(repoURL))
+	mirrorDir := filepath.Join(m.BaseDir, "mirrors", fmt.Sprintf("%s-%x.git", repoName, repoKey[:6]))
 	jobRoot := filepath.Join(m.BaseDir, "workspaces", workspaceID)
 	repoDir := filepath.Join(jobRoot, repoName)
 
@@ -97,20 +102,17 @@ func (m *Manager) PrepareJobWorkspace(repoURL, pinnedBaseCommit, generatedBranch
 	if err := os.MkdirAll(jobRoot, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create job workspace: %w", err)
 	}
-	if err := m.runGit(jobRoot, "clone", repoURL, repoName); err != nil {
-		return nil, fmt.Errorf("failed to clone repository: %w", err)
+	if err := m.ensureMirror(repoURL, mirrorDir); err != nil {
+		return nil, fmt.Errorf("failed to prepare repository mirror: %w", err)
 	}
-	if err := m.runGit(repoDir, "fetch", "origin", "--prune"); err != nil {
-		return nil, fmt.Errorf("failed to fetch remote: %w", err)
-	}
-	if err := m.runGit(repoDir, "cat-file", "-e", pinnedBaseCommit+"^{commit}"); err != nil {
+	if err := m.runGit(mirrorDir, "cat-file", "-e", pinnedBaseCommit+"^{commit}"); err != nil {
 		return nil, fmt.Errorf("pinned base commit %s not found or invalid: %w", pinnedBaseCommit, err)
 	}
-	if err := m.runGit(repoDir, "ls-remote", "--exit-code", "--heads", "origin", generatedBranchName); err == nil {
+	if err := m.runGit(mirrorDir, "ls-remote", "--exit-code", "--heads", "origin", generatedBranchName); err == nil {
 		return nil, fmt.Errorf("branch already exists on origin: %s", generatedBranchName)
 	}
-	if err := m.runGit(repoDir, "checkout", "-b", generatedBranchName, pinnedBaseCommit); err != nil {
-		return nil, fmt.Errorf("failed to create work branch: %w", err)
+	if err := m.runGit(mirrorDir, "worktree", "add", "-b", generatedBranchName, repoDir, pinnedBaseCommit); err != nil {
+		return nil, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
 	resolvedBase, err := m.runGitWithOutput(repoDir, "rev-parse", "HEAD")
@@ -120,11 +122,26 @@ func (m *Manager) PrepareJobWorkspace(repoURL, pinnedBaseCommit, generatedBranch
 	return &Workspace{
 		ID:         workspaceID,
 		RootDir:    jobRoot,
-		RepoDir:    repoDir,
+		RepoDir:    mirrorDir,
 		WorkDir:    repoDir,
 		BranchName: generatedBranchName,
 		BaseCommit: strings.TrimSpace(resolvedBase),
 	}, nil
+}
+
+func (m *Manager) ensureMirror(repoURL, mirrorDir string) error {
+	mirrorMu.Lock()
+	defer mirrorMu.Unlock()
+	if _, err := os.Stat(filepath.Join(mirrorDir, "HEAD")); os.IsNotExist(err) {
+		if err := os.MkdirAll(filepath.Dir(mirrorDir), 0700); err != nil {
+			return err
+		}
+		return m.runGit(filepath.Dir(mirrorDir), "clone", "--mirror", repoURL, mirrorDir)
+	}
+	if err := m.runGit(mirrorDir, "remote", "set-url", "origin", repoURL); err != nil {
+		return err
+	}
+	return m.runGit(mirrorDir, "fetch", "--prune", "origin")
 }
 
 // CleanWorktree checks if the worktree is clean
@@ -152,6 +169,11 @@ func (m *Manager) ProduceDiff(worktreeDir string) (string, error) {
 // CleanupWorktree removes the worktree safely
 func (m *Manager) CleanupWorktree(mainRepoDir, worktreeDir, branchName string) error {
 	if strings.Contains(filepath.Clean(worktreeDir), string(filepath.Separator)+"workspaces"+string(filepath.Separator)) {
+		if strings.HasSuffix(mainRepoDir, ".git") {
+			if err := m.runGit(mainRepoDir, "worktree", "remove", "--force", worktreeDir); err != nil {
+				return fmt.Errorf("failed to remove linked worktree: %w", err)
+			}
+		}
 		return os.RemoveAll(filepath.Dir(worktreeDir))
 	}
 	// First remove the worktree

@@ -160,6 +160,20 @@ func TestPrepareJobWorkspaceUsesIsolatedJobDirectory(t *testing.T) {
 	if ws.BaseCommit != sha {
 		t.Fatalf("expected resolved base %s, got %s", sha, ws.BaseCommit)
 	}
+	ws2, err := manager.PrepareJobWorkspace(origin, sha, "forgegrid/codex/second", "second-job")
+	if err != nil {
+		t.Fatalf("second PrepareJobWorkspace failed: %v", err)
+	}
+	mirrors, err := filepath.Glob(filepath.Join(base, "mirrors", "*.git"))
+	if err != nil || len(mirrors) != 1 {
+		t.Fatalf("expected one persistent mirror, got %v (err=%v)", mirrors, err)
+	}
+	if err := manager.CleanupWorktree(ws.RepoDir, ws.WorkDir, ws.BranchName); err != nil {
+		t.Fatalf("cleanup first worktree failed: %v", err)
+	}
+	if err := manager.CleanupWorktree(ws2.RepoDir, ws2.WorkDir, ws2.BranchName); err != nil {
+		t.Fatalf("cleanup second worktree failed: %v", err)
+	}
 }
 
 func runGitTest(t *testing.T, dir string, args ...string) {
