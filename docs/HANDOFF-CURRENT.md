@@ -1,6 +1,6 @@
 # ForgeGrid bring-forward run — current handoff
 
-Updated 2026-09-17 after normal compute activation. Claude has stopped; Codex is now the primary implementer. Six harmless smoke jobs completed across online workers; no updater, credential, destructive, or fault-injection action was performed.
+Updated 2026-09-17 after normal compute activation. Claude has stopped; Codex is now the primary implementer. Ten ForgeGrid workers are online after an idempotent existing-service start; Laptop08 failed the Action1 action and Laptop11 has no ForgeGrid registration. No updater, credential, destructive, or fault-injection action was performed.
 
 ## Current verified state
 
@@ -8,7 +8,7 @@ Updated 2026-09-17 after normal compute activation. Claude has stopped; Codex is
 |---|---|---|---|
 | `/home/josh/dev/6 Laptops/ForgeGrid` | `feature/qwen-assistant-v2` | `1e84e77` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-hygiene` | `chore/project-hygiene` | `051ed35` | census update pending |
-| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `a5685b2` | clean, pushed |
+| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `4b7bed8` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-self-update-reliability` | `fix/self-update-reliability` | `9ff9662` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-security-gates` | `fix/structured-execution-security-gates-v2` | `be08bcb` | parked, pushed |
 
@@ -40,7 +40,7 @@ The Qwen branch brings forward the persistent-history lineage through merge `338
 
 ## Next action
 
-First add immutable-SHA distributed validation jobs; then continue Phase 9 provider/UI wiring and Phase 7 mobile work on the Qwen branch, merge each completed branch head into `integration/next`, rerun the full suite and cross-compiles, and stop at Checkpoint A before updater/fault actions with exact immutable SHAs for independent review.
+Diagnose Laptop08 and Laptop11 worker connectivity, then add immutable-SHA distributed validation jobs; continue Phase 9 provider/UI wiring and Phase 7 mobile work on the Qwen branch, merge each completed branch head into `integration/next`, rerun the full suite and cross-compiles, and stop at Checkpoint A before updater/fault actions with exact immutable SHAs for independent review.
 
 ## Hard boundaries
 
