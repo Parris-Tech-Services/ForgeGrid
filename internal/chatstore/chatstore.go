@@ -209,6 +209,9 @@ func (s *Store) Append(id string, messages ...Message) (Conversation, error) {
 	if len(c.Messages) > 0 && conversationJSONSize(c, messages) > maxConversationBytes {
 		return Conversation{}, errors.New("conversation exceeds 4 MiB")
 	}
+	// Keep the in-memory state unchanged when a later whole-history limit
+	// rejects the append. Callers may retry after trimming the request.
+	original := c
 	for _, m := range messages {
 		m.ID = newID()
 		m.ConversationID = id
@@ -227,9 +230,14 @@ func (s *Store) Append(id string, messages ...Message) (Conversation, error) {
 	c.UpdatedAt = time.Now().UTC()
 	s.conversations[id] = c
 	if len(mustJSON(diskState{Conversations: s.conversations})) > maxHistoryBytes {
+		s.conversations[id] = original
 		return Conversation{}, errors.New("history exceeds 25 MiB")
 	}
-	return c, s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.conversations[id] = original
+		return Conversation{}, err
+	}
+	return c, nil
 }
 
 func mustJSON(v interface{}) []byte { b, _ := json.Marshal(v); return b }
