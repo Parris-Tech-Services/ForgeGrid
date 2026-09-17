@@ -1,7 +1,7 @@
 # ForgeGrid — Status
 
-**Where we are:** The local coordinator is restored from integration SHA `a5685b2`; six online ForgeGrid workers passed harmless smoke jobs. No updater or destructive fleet action was performed.
-**Next action:** Add immutable-SHA distributed validation jobs, then continue Qwen research UI/mobile/E2E work and record live evidence before Checkpoint A.
+**Where we are:** The local coordinator is restored from integration SHA `4b7bed8`; ten ForgeGrid workers are now online after an idempotent existing-service start. Laptop08 failed that Action1 action and Laptop11 still has no ForgeGrid registration. No updater or destructive fleet action was performed.
+**Next action:** Diagnose Laptop08/Laptop11 worker connectivity, then add immutable-SHA distributed validation jobs and continue Qwen research UI/mobile/E2E work.
 
 This is the single source of truth for the 2026-09-17 "bring everything forward" run
 (`~/forgegrid-handoff/2026-09-17/PROMPT.md`). Other status docs should link here
@@ -37,7 +37,7 @@ Full graph: `git log --graph --oneline --decorate --all`.
 
 ## Fleet
 
-DadLAN is **Laptop01–11 plus JParrisDesktop** (corrected 2026-09-17). Action1 currently reports 12 managed endpoints: 11 DadLAN laptops plus JParrisDesktop; 11 are connected and Laptop01 is disconnected. The coordinator currently reports six online ForgeGrid workers: JParrisDesktop, Laptop04, Laptop05, Laptop06, Laptop09 and Laptop10 (386). Laptop11 has no current ForgeGrid worker record. Laptop02 is reserved for the updater canary and was not used.
+DadLAN is **Laptop01–11 plus JParrisDesktop** (corrected 2026-09-17). Action1 reports 12 managed endpoints and 11 connected. After the existing-service recovery action, the coordinator reports ten online ForgeGrid workers: Laptop01, Laptop02, Laptop03, Laptop04, Laptop05, Laptop06, Laptop07, Laptop09, Laptop10 (386), and JParrisDesktop. Laptop08's Action1 action ended in `Error`; Laptop11's action ended `Success` but it still has no ForgeGrid worker registration/heartbeat. No autostart policy was changed. Laptop02 remains excluded from updater deployment decisions.
 
 Six harmless built-in smoke jobs completed successfully: `job-1165064ce6a32f09376fc26d38f16156`, `job-4bb17061b2ee0d5b5c1c3095750df0f1`, `job-430b8437605e07c71dcc12a94769a3cf`, `job-607bf8990c6be27356e5e34099da096a`, `job-fd86d4ae77b9ac408ae1d03b28a0236d`, and `job-9bc8714e4767e48935baf2093999b573`. These prove liveness/execution only, not immutable-source validation.
 
