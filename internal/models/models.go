@@ -175,6 +175,7 @@ type LLMConfig struct {
 	Endpoint        string `json:"endpoint"`
 	TimeoutSeconds  int    `json:"timeout_seconds"`
 	APICredentialID string `json:"api_credential_id"`
+	SearXNGURL      string `json:"searxng_url,omitempty"`
 }
 
 type CoordinatorState struct {
