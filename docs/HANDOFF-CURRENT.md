@@ -1,13 +1,14 @@
 # ForgeGrid bring-forward run — current handoff
 
-Updated 2026-09-17 after the updater concurrency fix. Claude has stopped; Codex is now the primary implementer. No DadLAN fleet machine has been touched.
+Updated 2026-09-17 after Phase 3 integration and a Qwen store rollback fix. Claude has stopped; Codex is now the primary implementer. No DadLAN fleet machine has been touched.
 
 ## Current verified state
 
 | Worktree | Branch | HEAD | State |
 |---|---|---|---|
-| `/home/josh/dev/6 Laptops/ForgeGrid` | `feature/qwen-assistant-v2` | `1c013ed` | clean, pushed |
-| `/home/josh/dev/6 Laptops/ForgeGrid-hygiene` | `chore/project-hygiene` | `d900e85` | this handoff update pending |
+| `/home/josh/dev/6 Laptops/ForgeGrid` | `feature/qwen-assistant-v2` | `1038713` | clean, pushed |
+| `/home/josh/dev/6 Laptops/ForgeGrid-hygiene` | `chore/project-hygiene` | `633d7f5` | clean, pushed |
+| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `72f1404` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-self-update-reliability` | `fix/self-update-reliability` | `9ff9662` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-security-gates` | `fix/structured-execution-security-gates-v2` | `be08bcb` | parked, pushed |
 
@@ -33,9 +34,13 @@ Evidence on `9ff9662`:
 
 The updater fix is committed and pushed to `origin/fix/self-update-reliability`. It is not deployed and no canary has run.
 
+## Integrated Qwen state
+
+The Qwen branch brings forward the persistent-history lineage through merge `338eacd`, adds hardened JSON persistence and search in `6d6e278`, and fixes failed-append in-memory rollback in `1038713`. The integrated branch contains the earlier work at `765abb1`. Server-side prompt/history assembly is present; chat-only auth, web research, and mobile polish are not yet complete.
+
 ## Next action
 
-Proceed with Phase 3 integration only after updating the canonical status file with this resolution. Then bring forward the JSON history implementation, implement server-side prompt assembly (D2), searchable history, web research and chat-only auth. Stop at Checkpoint A before any fleet action and provide exact immutable SHAs for independent review.
+Continue Phase 6/7/9 implementation on the Qwen branch, merge each completed branch head into `integration/next`, rerun the full suite, and stop at Checkpoint A before any fleet action with exact immutable SHAs for independent review.
 
 ## Hard boundaries
 

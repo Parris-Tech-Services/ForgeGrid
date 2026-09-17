@@ -1,7 +1,7 @@
 # ForgeGrid — Status
 
-**Where we are:** Phase 2 is green on updater commit `9ff9662`; no fleet machine has been touched. `govulncheck` remains unavailable and unverified.
-**Next action:** Begin Phase 3 integration from the verified branch heads, then complete Qwen history/search/security work before Checkpoint A.
+**Where we are:** Phase 3 integration is complete on `integration/next` at `72f1404`; updater concurrency and Qwen history/search changes are merged and pushed. No fleet machine has been touched.
+**Next action:** Complete chat-only auth, web-research interfaces/SSRF tests, mobile polish, and pre-fleet verification before Checkpoint A.
 
 This is the single source of truth for the 2026-09-17 "bring everything forward" run
 (`~/forgegrid-handoff/2026-09-17/PROMPT.md`). Other status docs should link here
@@ -12,12 +12,13 @@ disagree — recheck before trusting a stale entry.
 
 | Branch | Head SHA | Pushed? | Role this run |
 |---|---|---|---|
-| `feature/qwen-assistant-v2` | `f6c9914` | yes | Qwen assistant workstream (main worktree) |
+| `feature/qwen-assistant-v2` | `1038713` | yes | Qwen assistant workstream (main worktree) |
 | `feature/qwen-durable-history-sqlite` → `origin/backup/973c048-persistent-history` | `ae0359f` | yes | `973c048` rebased onto `f6c9914` (adds only the two roadmap docs already on `f6c9914`, nothing else changes). Branch name says "sqlite" — stale, D1 says JSON; content is what matters |
 | `temp-claude-work` → `origin/backup/973c048-persistent-history-original` | `973c048` | yes | Literal, unmodified historical commit. Preserved under this second name (not the first) because the first name was already repointed to `ae0359f` and this run never force-pushes — both objects exist on the remote, unambiguously named, neither lost |
 | `fix/self-update-reliability` | `9ff9662` | yes | Updater workstream; concurrency fix verified (own worktree `ForgeGrid-self-update-reliability`) |
 | `fix/structured-execution-security-gates-v2` | `be08bcb` | yes | Unrelated workstream (own worktree `ForgeGrid-security-gates`), parked — see Decisions |
-| `chore/project-hygiene` | (this commit) | no yet | This file, `.gitignore`, `tools/`, `CLAUDE.md` |
+| `chore/project-hygiene` | `633d7f5` | yes | This file, `.gitignore`, `tools/`, `CLAUDE.md` |
+| `integration/next` | `72f1404` | yes | Merged pre-fleet integration build |
 | `main` (local) | `505716f` | **no — 2 commits ahead of `origin/main`, unpushed** | Pre-existing anomaly, not created by this run — see Open risks |
 | `origin/main` | `03aa1ac` | — | Integration target |
 
@@ -27,11 +28,11 @@ Full graph: `git log --graph --oneline --decorate --all`.
 
 | Part | Item | Status |
 |---|---|---|
-| A | Persistent, searchable chat history | In progress — bringing `ae0359f` forward (D1: JSON store, not SQLite), search still to add (Phase 5) |
+| A | Persistent, searchable chat history | Integrated and tested — JSON store is mutexed, atomic/backed-up, searchable, hard-delete, and bounded; server-side prompt assembly is present. |
 | B | Opt-in web research | Not started (Phase 9) |
 | C | Remote phone access | Design only, not built (D4, Phase 10) |
 | D | Mobile-friendly UI | Not started (Phase 7) |
-| E | Security hardening / chat-only login | Not started (Phase 6) |
+| E | Security hardening / chat-only login | In progress — generic LLM route remains admin-only; separate chat-only login still to implement (Phase 6) |
 | — | Self-update reliability (findings A–E) | Fixed and tested on `9ff9662`, pushed, **not deployed to any laptop**; two-hop canary on Laptop02 planned for Phase 12, gated on Josh's "GO fleet" |
 
 ## Fleet
@@ -62,7 +63,7 @@ See `~/forgegrid-handoff/2026-09-17/PROMPT.md` section 4 (D1–D10) for the full
 - **A second amendment (received while Phase 2 was running) asked for the same fix via immutable tags instead of branch renaming, and asked that the earlier Codex session's changes be explicitly inventoried and verified.** Both are addressed:
   - The branch-based fix above already satisfies the underlying requirement (both commits preserved, unambiguously named, no force-push, no data loss) — kept as-is per the amendment's own fallback ("if you've already handled this differently, write down exactly what you did"), rather than adding redundant tags pointing at the same two commits.
   - Full inventory of what the earlier Codex session touched: exactly one push, to `backup/973c048-persistent-history` (later effectively split into the two branches above once the naming conflict was caught). Confirmed via `git log --all --since=2026-09-17` and a full remote branch re-listing that no other ref, commit, doc, or file was touched by it. Its tree-diff claim is verified, not just trusted: `ae0359f`'s only difference from `973c048` is the two roadmap docs that `f6c9914` (its actual parent) already had — no other content was added, changed or removed. Safe to bring forward in Phase 3 as-is.
-- The updater branch was fully revalidated at `9ff9662`; see the Phase 2 results table and `docs/HANDOFF-CURRENT.md` for exact commands. `govulncheck` was unavailable.
+- The updater branch was fully revalidated at `9ff9662`; the integrated branch `72f1404` also passed the Go test, race, vet, build, formatting, diff-check, and three cross-compile checks. `govulncheck` was unavailable in this environment and remains unverified.
 
 ## Phase 2 — baseline validation results
 
