@@ -1,14 +1,14 @@
 # ForgeGrid bring-forward run — current handoff
 
-Updated 2026-09-17 after auth hardening and the SSRF-safe research boundary. Claude has stopped; Codex is now the primary implementer. No DadLAN fleet machine has been touched.
+Updated 2026-09-17 after normal compute activation. Claude has stopped; Codex is now the primary implementer. Six harmless smoke jobs completed across online workers; no updater, credential, destructive, or fault-injection action was performed.
 
 ## Current verified state
 
 | Worktree | Branch | HEAD | State |
 |---|---|---|---|
-| `/home/josh/dev/6 Laptops/ForgeGrid` | `feature/qwen-assistant-v2` | `bfa7942` | clean, pushed |
-| `/home/josh/dev/6 Laptops/ForgeGrid-hygiene` | `chore/project-hygiene` | `633d7f5` | clean, pushed |
-| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `07bff11` | clean, pushed |
+| `/home/josh/dev/6 Laptops/ForgeGrid` | `feature/qwen-assistant-v2` | `1e84e77` | clean, pushed |
+| `/home/josh/dev/6 Laptops/ForgeGrid-hygiene` | `chore/project-hygiene` | `051ed35` | census update pending |
+| `/home/josh/dev/6 Laptops/ForgeGrid-integration` | `integration/next` | `a5685b2` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-self-update-reliability` | `fix/self-update-reliability` | `9ff9662` | clean, pushed |
 | `/home/josh/dev/6 Laptops/ForgeGrid-security-gates` | `fix/structured-execution-security-gates-v2` | `be08bcb` | parked, pushed |
 
@@ -36,12 +36,12 @@ The updater fix is committed and pushed to `origin/fix/self-update-reliability`.
 
 ## Integrated Qwen state
 
-The Qwen branch brings forward the persistent-history lineage through merge `338eacd`, adds hardened JSON persistence and search in `6d6e278`, fixes failed-append in-memory rollback in `1038713`, adds chat-only auth in `326af5c`, adds the tested SSRF-safe fetch boundary in `bfa7942`, and adds the bounded fixed-local SearXNG provider in `fc0fcdc`. The integrated branch contains these at `07bff11`. Server-side prompt/history, chat-only auth, and provider wiring are present; explicit UI toggle/source display, SearXNG deployment, and mobile polish are not yet complete.
+The Qwen branch brings forward the persistent-history lineage through merge `338eacd`, adds hardened JSON persistence and search in `6d6e278`, fixes failed-append in-memory rollback in `1038713`, adds chat-only auth in `326af5c`, adds the tested SSRF-safe fetch boundary in `bfa7942`, and adds the bounded fixed-local SearXNG provider in `fc0fcdc`. The integrated branch contains these at `a5685b2`. Server-side prompt/history, chat-only auth, and provider wiring are present; explicit UI toggle/source display, SearXNG deployment, and mobile polish are not yet complete.
 
 ## Next action
 
-Continue Phase 9 provider/UI wiring and Phase 7 mobile work on the Qwen branch, merge each completed branch head into `integration/next`, rerun the full suite and cross-compiles, and stop at Checkpoint A before any fleet action with exact immutable SHAs for independent review.
+First add immutable-SHA distributed validation jobs; then continue Phase 9 provider/UI wiring and Phase 7 mobile work on the Qwen branch, merge each completed branch head into `integration/next`, rerun the full suite and cross-compiles, and stop at Checkpoint A before updater/fault actions with exact immutable SHAs for independent review.
 
 ## Hard boundaries
 
-Fleet machines are Laptop01–11, JParrisDesktop, and any other registered worker; all are hands-off until Josh explicitly says `GO fleet`. Do not use Action1, MeshCentral, SMB, remote updates, restarts, credentials, or fault injection before that gate. Do not push to `main`, force-push, delete unrelated refs, or expose services publicly. Qwen remains advisory and policy-controlled.
+Normal compute is authorized by Josh's broadened `GO FLEET` instruction. Updater installation/canary, fault injection, credential changes, destructive recovery and irreversible fleet changes remain separately gated. Do not push to `main`, force-push, delete unrelated refs, or expose services publicly. Qwen remains advisory and policy-controlled.

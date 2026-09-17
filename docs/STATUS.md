@@ -1,7 +1,7 @@
 # ForgeGrid — Status
 
-**Where we are:** Safe integration work is at `integration/next` `07bff11`; updater concurrency, Qwen history/search, chat-only auth, and the bounded configurable research provider/fetch boundary are merged and pushed. No fleet machine has been touched.
-**Next action:** Add the explicit research toggle/UI source display, complete mobile polish and live-safe tests, then finish pre-fleet verification before Checkpoint A.
+**Where we are:** The local coordinator is restored from integration SHA `a5685b2`; six online ForgeGrid workers passed harmless smoke jobs. No updater or destructive fleet action was performed.
+**Next action:** Add immutable-SHA distributed validation jobs, then continue Qwen research UI/mobile/E2E work and record live evidence before Checkpoint A.
 
 This is the single source of truth for the 2026-09-17 "bring everything forward" run
 (`~/forgegrid-handoff/2026-09-17/PROMPT.md`). Other status docs should link here
@@ -37,7 +37,9 @@ Full graph: `git log --graph --oneline --decorate --all`.
 
 ## Fleet
 
-DadLAN is **Laptop01–11 plus JParrisDesktop** (corrected 2026-09-17; the source reports and the original bundle said Laptop01–10). Laptop11 is the HP ProBook 11 EE G2, 8GB RAM. All 11 laptops plus JParrisDesktop are completely hands-off — no Action1, MeshCentral, SMB or update-queue calls — until Josh sends "GO fleet".
+DadLAN is **Laptop01–11 plus JParrisDesktop** (corrected 2026-09-17). Action1 currently reports 12 managed endpoints: 11 DadLAN laptops plus JParrisDesktop; 11 are connected and Laptop01 is disconnected. The coordinator currently reports six online ForgeGrid workers: JParrisDesktop, Laptop04, Laptop05, Laptop06, Laptop09 and Laptop10 (386). Laptop11 has no current ForgeGrid worker record. Laptop02 is reserved for the updater canary and was not used.
+
+Six harmless built-in smoke jobs completed successfully: `job-1165064ce6a32f09376fc26d38f16156`, `job-4bb17061b2ee0d5b5c1c3095750df0f1`, `job-430b8437605e07c71dcc12a94769a3cf`, `job-607bf8990c6be27356e5e34099da096a`, `job-fd86d4ae77b9ac408ae1d03b28a0236d`, and `job-9bc8714e4767e48935baf2093999b573`. These prove liveness/execution only, not immutable-source validation.
 
 ## Gates
 
