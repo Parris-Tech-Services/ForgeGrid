@@ -59,3 +59,20 @@ dist/ForgeGrid-USB/C:/
 dist/ForgeGrid-USB/Linux/forgegrid
 dist/ForgeGrid-USB/Windows/ForgeGrid.exe
 dist/ForgeGrid-USB/Windows/ForgeGrid-x86.exe
+
+# Runtime data and secrets (never committed; see CLAUDE.md Guardrails)
+*.db
+*.db-journal
+llm-chat-history.json
+llm-chat-history.json.bak
+dashboard-login.txt
+chat-login.txt
+llm-api-key.txt
+llm-token.txt
+github-token.txt
+coordinator.json
+action1.json
+searxng-secret.txt
+searxng/secret_key
+__pycache__/
+*.pyc
