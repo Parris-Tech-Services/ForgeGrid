@@ -12,7 +12,7 @@ disagree — recheck before trusting a stale entry.
 
 | Branch | Head SHA | Pushed? | Role this run |
 |---|---|---|---|
-| `feature/qwen-assistant-v2` | `bfa7942` | yes | Qwen assistant workstream (main worktree) |
+| `feature/qwen-assistant-v2` | `3011b2b` | yes | Qwen assistant workstream (main worktree). `3011b2b` fixes a layout bug Josh reported: long history/message lists grew the whole page instead of scrolling internally, pushing the composer off-screen. CSS-only, verified with Playwright at 1280x800 and 375x700 with injected overflow content. |
 | `feature/qwen-durable-history-sqlite` → `origin/backup/973c048-persistent-history` | `ae0359f` | yes | `973c048` rebased onto `f6c9914` (adds only the two roadmap docs already on `f6c9914`, nothing else changes). Branch name says "sqlite" — stale, D1 says JSON; content is what matters |
 | `temp-claude-work` → `origin/backup/973c048-persistent-history-original` | `973c048` | yes | Literal, unmodified historical commit. Preserved under this second name (not the first) because the first name was already repointed to `ae0359f` and this run never force-pushes — both objects exist on the remote, unambiguously named, neither lost |
 | `fix/self-update-reliability` | `9ff9662` | yes | Updater workstream; concurrency fix verified (own worktree `ForgeGrid-self-update-reliability`) |
@@ -31,7 +31,7 @@ Full graph: `git log --graph --oneline --decorate --all`.
 | A | Persistent, searchable chat history | Integrated and tested — JSON store is mutexed, atomic/backed-up, searchable, hard-delete, and bounded; server-side prompt assembly is present. |
 | B | Opt-in web research | Fixed local SearXNG provider and safe fetch path implemented/tested; explicit UI toggle, source display and SearXNG deployment remain |
 | C | Remote phone access | Design only, not built (D4, Phase 10) |
-| D | Mobile-friendly UI | Not started (Phase 7) |
+| D | Mobile-friendly UI | Not started (Phase 7), but one reported layout bug fixed ad hoc: viewport overflow when history/messages are long (`3011b2b`) |
 | E | Security hardening / chat-only login | Chat-only login implemented and focused auth tests pass; broader request/logging/XSS coverage remains |
 | — | Self-update reliability (findings A–E) | Fixed and tested on `9ff9662`, pushed, **not deployed to any laptop**; two-hop canary on Laptop02 planned for Phase 12, gated on Josh's "GO fleet" |
 
