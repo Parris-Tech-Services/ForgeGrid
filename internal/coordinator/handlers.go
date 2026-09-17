@@ -65,6 +65,37 @@ func (c *Coordinator) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (c *Coordinator) isChatRequest(r *http.Request) bool {
+	if c.isAdminRequest(r) {
+		return true
+	}
+	user, pass, ok := r.BasicAuth()
+	if ok && user == "chat" && c.ChatToken != "" && pass == c.ChatToken {
+		return true
+	}
+	cookie, err := r.Cookie("forgegrid_chat")
+	return err == nil && c.ChatToken != "" && cookie.Value == c.ChatToken
+}
+
+func (c *Coordinator) requireChat(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !c.isChatRequest(r) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="ForgeGrid Chat"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !c.isAdminRequest(r) {
+			if _, err := r.Cookie("forgegrid_chat"); err != nil {
+				http.SetCookie(w, &http.Cookie{
+					Name: "forgegrid_chat", Value: c.ChatToken, Path: "/", HttpOnly: true,
+					Secure: !c.Insecure, SameSite: http.SameSiteStrictMode, MaxAge: 60 * 60 * 24 * 14,
+				})
+			}
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
 func hashToken(token string) string {
 	h := sha256.New()
 	h.Write([]byte(token))
