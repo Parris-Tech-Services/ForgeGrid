@@ -1,5 +1,9 @@
 # Qwen Assistant Evolution
 
+> **Current status lives in `docs/STATUS.md`** (on `chore/project-hygiene` /
+> `integration/next`, merged into this branch once integration lands). This file is
+> historical roadmap context; if it disagrees with `STATUS.md`, `STATUS.md` wins.
+
 qwen3.5:4b model weights are static at runtime, but the assistant system can improve through:
 
 ### Persistent memory
