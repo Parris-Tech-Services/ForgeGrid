@@ -25,6 +25,7 @@ type Message struct {
 	LatencyMs      int64     `json:"latency_ms,omitempty"`
 	Model          string    `json:"model,omitempty"`
 	SourceHost     string    `json:"source_host,omitempty"`
+	Sources        []string  `json:"sources,omitempty"`
 }
 
 type Conversation struct {

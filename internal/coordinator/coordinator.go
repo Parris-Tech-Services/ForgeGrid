@@ -18,6 +18,7 @@ import (
 	"forgegrid/internal/localllm"
 	"forgegrid/internal/models"
 	"forgegrid/internal/network"
+	"forgegrid/internal/research"
 	"forgegrid/internal/store"
 	"forgegrid/internal/ui"
 )
@@ -33,6 +34,7 @@ type Coordinator struct {
 	MessagingGateway MessagingGateway
 	LocalLLM         *localllm.Client
 	ChatHistory      *chatstore.Store
+	Research         research.Provider
 }
 
 func getOutboundIP() string {
