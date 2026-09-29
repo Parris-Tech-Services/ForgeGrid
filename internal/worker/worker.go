@@ -515,6 +515,9 @@ func (w *Worker) updateJobStatus(jobID, attemptID string, status models.JobStatu
 }
 
 func (w *Worker) updateJobStatusWithMetadata(jobID, attemptID string, status models.JobStatus, result string, logs []byte, seq int, artifacts []models.Artifact, pushedBranch, prURL string) {
+	if len(logs) > 0 {
+		fmt.Print(string(logs))
+	}
 	reqBody := map[string]interface{}{
 		"attempt_id":    attemptID,
 		"status":        status,
