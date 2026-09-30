@@ -27,8 +27,10 @@ Write-Host "Starting ForgeGrid runner..."
 Write-Host "Executable: $exe"
 Write-Host "Log: $log"
 
-Start-Process -FilePath $exe -ArgumentList "-mode worker" -WorkingDirectory (Split-Path -Parent $exe) -RedirectStandardOutput $log -RedirectStandardError $log -WindowStyle Minimized
+Start-Process -FilePath $exe -ArgumentList "-mode worker" -WorkingDirectory (Split-Path -Parent $exe) -RedirectStandardOutput $log -RedirectStandardError ($log + ".err") -WindowStyle Minimized
 
 Start-Sleep -Seconds 2
 Get-Process ForgeGrid -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, Path
 
+$monitorScript = Join-Path $Root "scripts\monitor-runner.ps1"
+Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorScript`""
