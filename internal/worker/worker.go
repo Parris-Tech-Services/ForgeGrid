@@ -37,6 +37,9 @@ type Worker struct {
 
 	mu         sync.Mutex
 	activeJobs map[string]context.CancelFunc
+	stopCh     chan struct{}
+	stopOnce   sync.Once
+	background sync.WaitGroup
 }
 
 type WorkerCredentials struct {
@@ -87,6 +90,7 @@ func New(nodeName, workspace string, insecure bool) *Worker {
 		Workspace:  workspace,
 		Insecure:   insecure,
 		activeJobs: make(map[string]context.CancelFunc),
+		stopCh: make(chan struct{}),
 	}
 }
 
@@ -249,14 +253,31 @@ func (w *Worker) Start() {
 	if w.Client == nil {
 		w.Client = &http.Client{Timeout: 10 * time.Second} // Should only happen in tests that bypassed Pair
 	}
-	go w.heartbeatLoop()
-	go w.jobLoop()
+	w.background.Add(2)
+	go func() { defer w.background.Done(); w.heartbeatLoop() }()
+	go func() { defer w.background.Done(); w.jobLoop() }()
+}
+
+// Stop cancels background activity and waits for any in-flight jobs before a
+// test workspace is removed or an application shuts down the worker.
+func (w *Worker) Stop() {
+	w.stopOnce.Do(func() { close(w.stopCh) })
+	w.mu.Lock()
+	for _, cancel := range w.activeJobs { cancel() }
+	w.mu.Unlock()
+	w.background.Wait()
+	if w.Client != nil {
+		if transport, ok := w.Client.Transport.(*http.Transport); ok {
+			transport.CloseIdleConnections()
+		}
+	}
 }
 
 func (w *Worker) heartbeatLoop() {
 	for {
+		select { case <-w.stopCh: return; default: }
 		w.sendHeartbeat()
-		time.Sleep(5 * time.Second)
+		select { case <-w.stopCh: return; case <-time.After(5 * time.Second): }
 	}
 }
 
@@ -301,8 +322,9 @@ func (w *Worker) sendHeartbeat() {
 
 func (w *Worker) jobLoop() {
 	for {
+		select { case <-w.stopCh: return; default: }
 		w.pollJobs()
-		time.Sleep(2 * time.Second)
+		select { case <-w.stopCh: return; case <-time.After(2 * time.Second): }
 	}
 }
 
@@ -336,7 +358,8 @@ func (w *Worker) pollJobs() {
 			_, active := w.activeJobs[job.ID]
 			w.mu.Unlock()
 			if !active {
-				go w.executeJob(job)
+				w.background.Add(1)
+				go func(job models.Job) { defer w.background.Done(); w.executeJob(job) }(job)
 			}
 		}
 	}
