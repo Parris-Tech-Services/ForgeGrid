@@ -216,7 +216,22 @@ func (c *Coordinator) Start(port string) error {
 func (c *Coordinator) writeDashboardLoginFile(uiURL, adminToken string) (string, error) {
 	path := filepath.Join(c.Store.Dir(), "dashboard-login.txt")
 	body := fmt.Sprintf("ForgeGrid Dashboard Login\n\nURL: %s\nUsername: admin\nPassword: %s\n\nKeep this file private. Anyone with this password can control the local ForgeGrid coordinator.\n", uiURL, adminToken)
-	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+	// Set private file permissions before writing the login secret, so a
+	// permissive inherited Windows ACL never exposes the password.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil { return path, err }
+	if err := securePrivateFile(path); err != nil {
+		file.Close()
+		os.Remove(path)
+		return path, err
+	}
+	if _, err := file.Write([]byte(body)); err != nil {
+		file.Close()
+		os.Remove(path)
+		return path, err
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(path)
 		return path, err
 	}
 	return path, nil
