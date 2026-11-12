@@ -40,11 +40,12 @@ func (c *Coordinator) githubToken() string {
 	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
 		return compactToken(token)
 	}
-	b, err := os.ReadFile(filepath.Join(c.Store.Dir(), "github-token.txt"))
-	if err != nil {
+	path := filepath.Join(c.Store.Dir(), "github-token.txt")
+	if !privateFileReadable(path) {
 		return ""
 	}
-	if info, err := os.Stat(filepath.Join(c.Store.Dir(), "github-token.txt")); err == nil && info.Mode().Perm()&0077 != 0 {
+	b, err := os.ReadFile(path)
+	if err != nil {
 		return ""
 	}
 	return compactToken(string(b))
