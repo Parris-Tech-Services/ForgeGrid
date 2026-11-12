@@ -35,7 +35,7 @@ func TestGitHubTokenFileRequiresOwnerOnlyPermissions(t *testing.T) {
 	if got := c.githubToken(); got != "" {
 		t.Fatalf("expected loose token file to be ignored, got %q", got)
 	}
-	if err := os.Chmod(path, 0600); err != nil {
+	if err := securePrivateFile(path); err != nil {
 		t.Fatalf("chmod token: %v", err)
 	}
 	if got := c.githubToken(); got != "loose" {
