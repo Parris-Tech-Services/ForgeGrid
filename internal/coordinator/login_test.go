@@ -41,11 +41,7 @@ func TestWriteDashboardLoginFile(t *testing.T) {
 		}
 	}
 
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat login file: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0600 {
-		t.Fatalf("permissions = %v, want 0600", got)
+	if !privateFileReadable(path) {
+		t.Fatalf("dashboard login must be accessible only by its owner and privileged system accounts")
 	}
 }
