@@ -39,7 +39,7 @@ func New(s *store.Store, insecure bool) *Coordinator {
 		Store:    s,
 		IP:       getOutboundIP(),
 		Insecure: insecure,
-		stopCh: make(chan struct{}),
+		stopCh:   make(chan struct{}),
 	}
 }
 
@@ -151,7 +151,9 @@ func (c *Coordinator) Start(port string) error {
 // It does not grant network access or alter the coordinator's pairing model.
 func (c *Coordinator) Stop() {
 	c.stopOnce.Do(func() { close(c.stopCh) })
-	if c.Listener != nil { _ = c.Listener.Close() }
+	if c.Listener != nil {
+		_ = c.Listener.Close()
+	}
 	c.statusWG.Wait()
 }
 
@@ -171,7 +173,9 @@ func (c *Coordinator) checkWorkerStatus() {
 					changed = true
 				}
 			}
-			if changed { c.Store.Save() }
+			if changed {
+				c.Store.Save()
+			}
 			c.Store.Mu.Unlock()
 		}
 	}

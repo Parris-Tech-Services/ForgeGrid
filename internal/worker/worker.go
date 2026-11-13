@@ -90,7 +90,7 @@ func New(nodeName, workspace string, insecure bool) *Worker {
 		Workspace:  workspace,
 		Insecure:   insecure,
 		activeJobs: make(map[string]context.CancelFunc),
-		stopCh: make(chan struct{}),
+		stopCh:     make(chan struct{}),
 	}
 }
 
@@ -263,7 +263,9 @@ func (w *Worker) Start() {
 func (w *Worker) Stop() {
 	w.stopOnce.Do(func() { close(w.stopCh) })
 	w.mu.Lock()
-	for _, cancel := range w.activeJobs { cancel() }
+	for _, cancel := range w.activeJobs {
+		cancel()
+	}
 	w.mu.Unlock()
 	w.background.Wait()
 	if w.Client != nil {
@@ -275,9 +277,17 @@ func (w *Worker) Stop() {
 
 func (w *Worker) heartbeatLoop() {
 	for {
-		select { case <-w.stopCh: return; default: }
+		select {
+		case <-w.stopCh:
+			return
+		default:
+		}
 		w.sendHeartbeat()
-		select { case <-w.stopCh: return; case <-time.After(5 * time.Second): }
+		select {
+		case <-w.stopCh:
+			return
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
 
@@ -322,9 +332,17 @@ func (w *Worker) sendHeartbeat() {
 
 func (w *Worker) jobLoop() {
 	for {
-		select { case <-w.stopCh: return; default: }
+		select {
+		case <-w.stopCh:
+			return
+		default:
+		}
 		w.pollJobs()
-		select { case <-w.stopCh: return; case <-time.After(2 * time.Second): }
+		select {
+		case <-w.stopCh:
+			return
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 
@@ -401,6 +419,15 @@ func (w *Worker) executeJob(job models.Job) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	w.mu.Lock()
+	// Synchronise admission with Stop's cancellation sweep: a poll that
+	// returns after shutdown must not register a fresh, uncancelled job.
+	select {
+	case <-w.stopCh:
+		w.mu.Unlock()
+		cancel()
+		return
+	default:
+	}
 	if w.activeJobs == nil {
 		w.activeJobs = make(map[string]context.CancelFunc)
 	}
