@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"forgegrid/internal/network"
@@ -18,6 +19,9 @@ type Coordinator struct {
 	Insecure    bool
 	Fingerprint string
 	Listener    net.Listener
+	stopCh      chan struct{}
+	stopOnce    sync.Once
+	statusWG    sync.WaitGroup
 }
 
 func getOutboundIP() string {
@@ -35,6 +39,7 @@ func New(s *store.Store, insecure bool) *Coordinator {
 		Store:    s,
 		IP:       getOutboundIP(),
 		Insecure: insecure,
+		stopCh:   make(chan struct{}),
 	}
 }
 
@@ -89,7 +94,8 @@ func (c *Coordinator) Start(port string) error {
 		addr = fmt.Sprintf("0.0.0.0:%s", port)
 	}
 
-	go c.checkWorkerStatus()
+	c.statusWG.Add(1)
+	go func() { defer c.statusWG.Done(); c.checkWorkerStatus() }()
 
 	scheme := "https"
 	if c.Insecure {
@@ -141,20 +147,36 @@ func (c *Coordinator) Start(port string) error {
 	return server.ListenAndServeTLS("", "")
 }
 
+// Stop stops the status monitor and closes an explicitly supplied listener.
+// It does not grant network access or alter the coordinator's pairing model.
+func (c *Coordinator) Stop() {
+	c.stopOnce.Do(func() { close(c.stopCh) })
+	if c.Listener != nil {
+		_ = c.Listener.Close()
+	}
+	c.statusWG.Wait()
+}
+
 func (c *Coordinator) checkWorkerStatus() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 	for {
-		time.Sleep(5 * time.Second)
-		c.Store.Mu.Lock()
-		changed := false
-		for _, w := range c.Store.Workers {
-			if w.Status == "online" && time.Since(w.LastSeen) > 15*time.Second {
-				w.Status = "offline"
-				changed = true
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			c.Store.Mu.Lock()
+			changed := false
+			for _, w := range c.Store.Workers {
+				if w.Status == "online" && time.Since(w.LastSeen) > 15*time.Second {
+					w.Status = "offline"
+					changed = true
+				}
 			}
+			if changed {
+				c.Store.Save()
+			}
+			c.Store.Mu.Unlock()
 		}
-		if changed {
-			c.Store.Save()
-		}
-		c.Store.Mu.Unlock()
 	}
 }

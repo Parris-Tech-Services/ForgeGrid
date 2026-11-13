@@ -33,6 +33,7 @@ func TestIntegration(t *testing.T) {
 	}
 
 	c := coordinator.New(s, false) // secure mode
+	t.Cleanup(c.Stop) // stop monitor/listener before t.TempDir removes the store
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -132,6 +133,7 @@ func TestIntegration(t *testing.T) {
 
 	// 5. Authenticated worker heartbeat
 	w1Restarted.Start()
+	t.Cleanup(w1Restarted.Stop) // drain heartbeat/job loops before coordinator shutdown
 	time.Sleep(2 * time.Second)
 
 	// 6. Worker appearing online
