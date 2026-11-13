@@ -2,10 +2,34 @@ package worker
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+
+	"forgegrid/internal/models"
 )
+
+// A pending poll may finish during shutdown. Its returned job must not start
+// after Stop has already cancelled all registered jobs.
+func TestStoppedWorkerRejectsLateJob(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	w := New("stopped-worker", t.TempDir(), true)
+	w.CoordinatorURL = server.URL
+	w.Client = server.Client()
+	w.Stop()
+	w.executeJob(models.Job{ID: "late-job", Task: "test", Challenge: "shutdown"})
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("stopped worker sent %d job status requests", got)
+	}
+}
 
 func TestWorkerCredentials(t *testing.T) {
 	// Setup custom home dir to avoid polluting user space during tests
