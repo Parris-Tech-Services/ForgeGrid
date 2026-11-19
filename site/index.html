@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="ForgeGrid AI workstation and agent hardware planning guide: MS-A2 evaluation, desktop recommendation, browser automation sizing and fleet roles.">
+  <title>ForgeGrid | AI Workstation Planner</title>
+  <style>
+    :root{color-scheme:dark;--bg:#08111f;--panel:#0f1c2e;--panel2:#13243a;--text:#eef6ff;--muted:#9fb3c8;--line:#29415f;--accent:#66e3b4;--accent2:#7db8ff;--warn:#ffd27a;--shadow:0 18px 45px rgba(0,0,0,.24)}
+    *{box-sizing:border-box} body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:radial-gradient(circle at top right,#123255 0,transparent 30%),var(--bg);color:var(--text);line-height:1.55}
+    a{color:var(--accent2)} .wrap{width:min(1160px,calc(100% - 32px));margin:auto}.hero{padding:64px 0 32px}.eyebrow{font-size:.78rem;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);font-weight:800}.hero h1{font-size:clamp(2.2rem,6vw,4.8rem);line-height:.96;max-width:900px;margin:.35rem 0 1rem}.hero p{font-size:1.1rem;color:var(--muted);max-width:780px}.pill{display:inline-flex;gap:.45rem;align-items:center;padding:.4rem .65rem;border:1px solid var(--line);border-radius:999px;background:rgba(15,28,46,.72);margin:.25rem .35rem .25rem 0;color:#d9e8f6;font-size:.86rem}
+    .recommend{margin:22px 0 36px;padding:22px;border:1px solid rgba(102,227,180,.45);background:linear-gradient(135deg,rgba(102,227,180,.1),rgba(125,184,255,.08));border-radius:20px;box-shadow:var(--shadow)}.recommend strong{color:var(--accent)}
+    .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}.card{grid-column:span 4;background:linear-gradient(180deg,var(--panel),#0c1727);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:var(--shadow)}.card h3{margin:.2rem 0 .4rem}.card p,.card li{color:var(--muted)}.tag{font-size:.78rem;font-weight:800;color:var(--accent);text-transform:uppercase;letter-spacing:.08em}.score{font-size:2.4rem;font-weight:850;margin:.3rem 0}.score span{font-size:.95rem;color:var(--muted);font-weight:500}
+    section{padding:26px 0}h2{font-size:clamp(1.55rem,3vw,2.25rem);margin-bottom:.5rem}.sub{color:var(--muted);max-width:760px;margin-top:0}.comparison{overflow-x:auto;border:1px solid var(--line);border-radius:16px;background:var(--panel)}table{width:100%;border-collapse:collapse;min-width:720px}th,td{text-align:left;padding:13px 16px;border-bottom:1px solid var(--line)}th{color:#d9ecff;background:#13233a}td{color:var(--muted)}td:first-child{color:var(--text);font-weight:700}
+    .planner{display:grid;grid-template-columns:1fr 1fr;gap:18px}.control,.result{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px}.control label{display:flex;justify-content:space-between;gap:20px;font-weight:700;margin-bottom:10px}.control input[type=range]{width:100%;accent-color:var(--accent)}.checks{display:grid;gap:10px;margin-top:20px}.checks label{justify-content:flex-start;font-weight:500;color:var(--muted)}input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent)}.ram{font-size:4rem;line-height:1;font-weight:900;color:var(--accent);margin:.6rem 0}.result p{color:var(--muted)}
+    .timeline{display:grid;gap:12px}.row{display:grid;grid-template-columns:180px 1fr;gap:18px;padding:15px 0;border-bottom:1px solid var(--line)}.row strong{color:var(--accent2)}.row div:last-child{color:var(--muted)}
+    .brief{white-space:pre-wrap;background:#07101c;border:1px solid var(--line);border-radius:15px;padding:18px;color:#dfefff}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}button,.button{border:0;border-radius:11px;padding:11px 15px;font:inherit;font-weight:800;cursor:pointer;text-decoration:none;background:var(--accent);color:#06130f}.button.secondary{background:var(--panel2);color:var(--text);border:1px solid var(--line)}
+    .foot{border-top:1px solid var(--line);margin-top:38px;padding:28px 0 44px;color:var(--muted);font-size:.9rem}
+    .note{border-left:4px solid var(--warn);padding:12px 16px;background:rgba(255,210,122,.07);border-radius:8px;color:#e8d4ad}
+    @media(max-width:850px){.card{grid-column:span 12}.planner{grid-template-columns:1fr}.row{grid-template-columns:1fr;gap:4px}.hero{padding-top:42px}}
+  </style>
+</head>
+<body>
+  <header class="hero wrap">
+    <div class="eyebrow">ForgeGrid hardware planning · 15 Sep 2026</div>
+    <h1>AI workstation planning for real agent workloads.</h1>
+    <p>A practical guide for cloud AI, ChatGPT desktop, Chrome automation, local helper models and ForgeGrid workers—built from the workstation and fleet decisions behind DadLAN/Avance.</p>
+    <div>
+      <span class="pill">50+ browser tabs</span><span class="pill">ChatGPT desktop</span><span class="pill">AI agents</span><span class="pill">64 GB baseline</span><span class="pill">serviceability first</span>
+    </div>
+    <div class="recommend"><strong>Current recommendation for Shannon:</strong> if Brendan can build a conventional compact desktop for roughly the MS-A2 budget, prefer the desktop for quieter sustained load, standard replaceable parts and easier expansion. The MS-A2 remains an excellent compact fallback.</div>
+  </header>
+
+  <main class="wrap">
+    <section>
+      <h2>Three different jobs, three different machines</h2>
+      <p class="sub">The mistake to avoid is buying every AI computer as though it were a local-LLM GPU server. Hosted AI, browser automation and local inference stress different parts of a PC.</p>
+      <div class="grid">
+        <article class="card"><div class="tag">Shannon workstation</div><h3>Cloud AI + browser automation</h3><div class="score">64 GB <span>RAM target</span></div><p>Prioritise memory, a strong modern CPU, fast NVMe storage, cooling, quiet operation and serviceability. Integrated graphics are enough initially.</p></article>
+        <article class="card"><div class="tag">ForgeGrid worker</div><h3>Distributed jobs</h3><div class="score">16–32 GB <span>often enough</span></div><p>Builds, tests, browser clients and deterministic jobs can be distributed across cheaper machines. Hardware should be matched to assigned work.</p></article>
+        <article class="card"><div class="tag">Local AI server</div><h3>Models on your own hardware</h3><div class="score">GPU/VRAM <span>becomes critical</span></div><p>Only pay for a discrete GPU when an identified local-model, CUDA, rendering or GPU-compute workload actually needs it.</p></article>
+      </div>
+    </section>
+
+    <section>
+      <h2>MS-A2 vs a Brendan-built desktop</h2>
+      <p class="sub">The MS-A2 is very capable. The desktop recommendation is about sustained thermals, maintenance and lifespan—not because the mini PC lacks performance.</p>
+      <div class="comparison"><table>
+        <thead><tr><th>Area</th><th>Minisforum MS-A2</th><th>Compact desktop</th></tr></thead>
+        <tbody>
+          <tr><td>CPU density</td><td>Excellent: Ryzen 9 9955HX, 16C/32T</td><td>Excellent with a modern 12–16 core Ryzen</td></tr>
+          <tr><td>RAM</td><td>Up to 96 GB DDR5 SO-DIMM</td><td>64 GB now; commonly 96/128 GB+ upgrade path</td></tr>
+          <tr><td>Cooling</td><td>Impressive for 1.78 L, but stressed by sustained load</td><td>Large slow fans and much more thermal headroom</td></tr>
+          <tr><td>Noise</td><td>Small fast fan can remain audible</td><td>Can be tuned very quiet</td></tr>
+          <tr><td>Repairability</td><td>Good for a mini PC, but specialised</td><td>Standard PSU/fans/RAM/SSD/board/cooler</td></tr>
+          <tr><td>Networking</td><td>Exceptional: 2.5GbE + dual 10G SFP+</td><td>Usually 2.5GbE; add more only if needed</td></tr>
+          <tr><td>GPU need</td><td>Radeon 610M is fine for office/cloud AI</td><td>Integrated graphics initially; easy GPU upgrade later</td></tr>
+          <tr><td>Best reason to buy</td><td>Maximum capability per litre</td><td>Maximum dependable productivity over years</td></tr>
+        </tbody>
+      </table></div>
+      <p class="note"><strong>Power detail:</strong> AMD lists the 9955HX at 55 W default and 55–75 W configurable TDP. Minisforum advertises up to 100 W turbo in the MS-A2. Long stress tests show the compact cooling system eventually reduces sustained power.</p>
+    </section>
+
+    <section>
+      <h2>Interactive RAM planner</h2>
+      <p class="sub">This is a practical sizing aid rather than a benchmark. Real Chrome memory use depends on sites, extensions, media, automation and tab discarding.</p>
+      <div class="planner">
+        <div class="control">
+          <label for="tabs"><span>Open Chrome tabs</span><span id="tabOut">52</span></label>
+          <input id="tabs" type="range" min="5" max="120" value="52">
+          <div class="checks">
+            <label><input id="agents" type="checkbox" checked> Multiple AI/browser automation processes</label>
+            <label><input id="dev" type="checkbox" checked> IDEs, builds, office apps and dev tools</label>
+            <label><input id="local" type="checkbox"> Local models or VMs/containers</label>
+          </div>
+        </div>
+        <div class="result">
+          <div class="tag">Recommended starting memory</div>
+          <div class="ram" id="ramOut">64 GB</div>
+          <p id="ramReason">Best fit for 40–60 tabs plus several agents and normal development tools, with enough headroom to avoid constant paging.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Recommended Shannon build</h2>
+      <div class="comparison"><table>
+        <tbody>
+          <tr><td>CPU</td><td>Modern Ryzen 9 9900X-class / strong 12–16 core desktop CPU</td></tr>
+          <tr><td>RAM</td><td>64 GB DDR5 in two DIMMs; board capable of 96/128 GB+</td></tr>
+          <tr><td>Storage</td><td>2 TB quality NVMe SSD</td></tr>
+          <tr><td>Cooling</td><td>Large quality tower air cooler</td></tr>
+          <tr><td>Case</td><td>Well-ventilated micro-ATX or compact ATX</td></tr>
+          <tr><td>PSU</td><td>Quality ~650 W unit with GPU headroom</td></tr>
+          <tr><td>Graphics</td><td>Integrated graphics initially</td></tr>
+          <tr><td>OS</td><td>Windows 11 Pro</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section>
+      <h2>Copy the procurement brief</h2>
+      <div id="brief" class="brief">Can you build a workstation around the same budget as the Minisforum MS-A2, with roughly equivalent real-world CPU performance and 64 GB RAM, but prioritising quiet sustained operation, cooling, reliability, standard replaceable parts and future expansion rather than making it tiny? It will mainly run ChatGPT/AI agents, browser automation with up to roughly 52 Chrome tabs, office apps and development tools. A discrete GPU is not required initially unless there is a clear local-AI reason for one. Prefer 2 TB NVMe storage and an easy path to 96/128 GB RAM later.</div>
+      <div class="actions"><button id="copy">Copy brief</button><a class="button secondary" href="https://au.minisforum.com/products/minisforum-ms-a2">MS-A2 product page</a><a class="button secondary" href="https://www.amd.com/en/products/processors/laptop/ryzen/9000-series/amd-ryzen-9-9955hx.html">AMD CPU specs</a></div>
+    </section>
+
+    <section>
+      <h2>How this fits the existing fleet</h2>
+      <p class="sub">ForgeGrid exists because not every job needs to run on the newest machine. The current direction is a coordinator plus specialised workers, using cloud flagship models where appropriate and modest local models where they are useful.</p>
+      <div class="timeline">
+        <div class="row"><strong>AVANCE-WS7</strong><div>HP ProDesk 400 G6 Mini, i5-10500T, ~24 GB: coordinator/controller, routing and orchestration.</div></div>
+        <div class="row"><strong>JParrisDesktop</strong><div>i5-9400, 16 GB, GTX 1660 6 GB: strongest existing GPU/local-model box.</div></div>
+        <div class="row"><strong>Ryzen 5 5600U / 16 GB</strong><div>Higher-priority intelligent worker for development and distributed jobs.</div></div>
+        <div class="row"><strong>L480-class</strong><div>General dev/test workers; inexpensive RAM upgrades can still make sense.</div></div>
+        <div class="row"><strong>Low-end legacy nodes</strong><div>Use for monitoring, lightweight execution and testing rather than expensive upgrades.</div></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Decision rule</h2>
+      <div class="recommend"><strong>Choose the desktop</strong> when its quote is reasonably close to the MS-A2 and this will be a daily business workstation for years. <strong>Choose the MS-A2</strong> when compactness, portability or its specialised networking justify it—or when the price advantage is substantial.</div>
+      <p class="sub">For the full technical context, sourcing history, local-model notes, automation security principles and implementation checklist, read <a href="../Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md">AI_WORKSTATION_AND_AGENT_HARDWARE.md</a> in the repository.</p>
+    </section>
+  </main>
+
+  <footer class="foot"><div class="wrap">ForgeGrid · hardware planning resource · no secrets or credentials are embedded in this page.</div></footer>
+  <script>
+    const tabs=document.getElementById('tabs'),tabOut=document.getElementById('tabOut'),agents=document.getElementById('agents'),dev=document.getElementById('dev'),local=document.getElementById('local'),ramOut=document.getElementById('ramOut'),ramReason=document.getElementById('ramReason');
+    function recalc(){const t=Number(tabs.value);tabOut.textContent=t;let score=0;if(t>25)score++;if(t>60)score++;if(agents.checked)score++;if(dev.checked)score++;if(local.checked)score+=2;let ram=32,reason='Suitable for ordinary office work, cloud AI and a moderate browser session.';if(score>=3){ram=64;reason='Best fit for a large browser session plus several agents and normal development tools, with enough headroom to avoid constant paging.'}if(score>=6){ram=96;reason='Heavy browser automation combined with local models, VMs or containers benefits from substantially more memory.'}if(t>100&&local.checked){ram=128;reason='This has moved into workstation/lab territory: very large browser state plus local compute deserves 128 GB-class capacity.'}ramOut.textContent=ram+' GB';ramReason.textContent=reason}
+    [tabs,agents,dev,local].forEach(el=>el.addEventListener('input',recalc));recalc();
+    document.getElementById('copy').addEventListener('click',async()=>{const b=document.getElementById('copy');try{await navigator.clipboard.writeText(document.getElementById('brief').innerText);b.textContent='Copied';setTimeout(()=>b.textContent='Copy brief',1400)}catch(e){b.textContent='Select text to copy'}});
+  </script>
+</body>
+</html>
