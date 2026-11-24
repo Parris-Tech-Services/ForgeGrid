@@ -36,7 +36,7 @@ jobs:
           sed -i 's#../Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md#https://github.com/joshualparris/ForgeGrid/blob/main/Documentation/AI_WORKSTATION_AND_AGENT_HARDWARE.md#g' _pages/index.html
 
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload static planner
         uses: actions/upload-pages-artifact@v4
