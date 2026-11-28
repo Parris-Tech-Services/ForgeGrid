@@ -24,6 +24,7 @@ const DefaultChannel = "household"
 type channelState struct {
 	NextSeq  uint64                      `json:"next_seq"`
 	Channels map[string][]ChannelMessage `json:"channels"`
+	Meta     map[string]ChannelMeta      `json:"meta,omitempty"`
 }
 
 type Store struct {
@@ -32,6 +33,7 @@ type Store struct {
 	agents   map[string]AgentRegistration
 	messages map[string]AgentMessage
 	channels map[string][]ChannelMessage
+	chanMeta map[string]ChannelMeta
 	nextSeq  uint64
 
 	// reloadMu serialises agents.json re-reads; agentsMod/agentsSize remember
@@ -65,6 +67,7 @@ func NewStore() (*Store, error) {
 		agents:   make(map[string]AgentRegistration),
 		messages: make(map[string]AgentMessage),
 		channels: make(map[string][]ChannelMessage),
+		chanMeta: make(map[string]ChannelMeta),
 	}
 
 	if err := s.load(); err != nil {
@@ -101,6 +104,9 @@ func (s *Store) load() error {
 		}
 		if st.Channels != nil {
 			s.channels = st.Channels
+		}
+		if st.Meta != nil {
+			s.chanMeta = st.Meta
 		}
 		s.nextSeq = st.NextSeq
 	}
@@ -305,19 +311,21 @@ func (s *Store) ReloadAgentsIfChanged() {
 	s.agentsSize = fi.Size()
 }
 
-func (s *Store) saveChannels() error {
+// saveChannelsLocked persists channel state. Callers hold s.mu; it acquires the
+// save mutex only, so it must not be called while holding saveMu.
+func (s *Store) saveChannelsLocked() error {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 
-	s.mu.RLock()
-	st := channelState{NextSeq: s.nextSeq, Channels: s.channels}
-	s.mu.RUnlock()
+	st := s.channelStateLocked()
+	return s.writeFile("channels.json", st)
+}
 
-	b, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		return err
-	}
-	return atomicWrite(filepath.Join(s.dataDir, "channels.json"), b)
+// channelStateLocked snapshots channel state. Callers hold at least s.mu.RLock.
+func (s *Store) channelStateLocked() []byte {
+	st := channelState{NextSeq: s.nextSeq, Channels: s.channels, Meta: s.chanMeta}
+	b, _ := json.MarshalIndent(st, "", "  ")
+	return b
 }
 
 // PostChannelMessage appends one message to a channel and returns it with its
@@ -343,9 +351,10 @@ func (s *Store) PostChannelMessage(channel, sender, body string) (ChannelMessage
 		log = log[len(log)-maxChannelMessages:]
 	}
 	s.channels[channel] = log
+	s.claimChannelOwnerLocked(channel, sender)
+	err = s.saveChannelsLocked()
 	s.mu.Unlock()
-
-	if err := s.saveChannels(); err != nil {
+	if err != nil {
 		return ChannelMessage{}, err
 	}
 	return msg, nil
@@ -395,9 +404,53 @@ func (s *Store) ListChannels() []ChannelInfo {
 		if len(log) > 0 {
 			last = log[len(log)-1].Seq
 		}
-		out = append(out, ChannelInfo{Name: name, LastSeq: last, Count: len(log)})
+		meta := s.chanMeta[name]
+		out = append(out, ChannelInfo{
+			Name:     name,
+			LastSeq:  last,
+			Count:    len(log),
+			Owner:    meta.Owner,
+			Members:  meta.Members,
+			ReadOnly: meta.ReadOnly,
+		})
 	}
 	return out
+}
+
+// ChannelMetaOf returns the policy for a channel. An unknown or unconfigured
+// channel has the zero policy, which allows every authenticated agent.
+func (s *Store) ChannelMetaOf(channel string) ChannelMeta {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.chanMeta[channel]
+}
+
+// SetChannelMeta stores a channel policy. A channel with no owner is claimed by
+// whoever configures it first.
+func (s *Store) SetChannelMeta(channel string, meta ChannelMeta) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.chanMeta[channel]; !ok {
+		s.chanMeta[channel] = meta
+	} else {
+		s.chanMeta[channel] = meta
+	}
+	if _, ok := s.channels[channel]; !ok {
+		s.channels[channel] = []ChannelMessage{}
+	}
+	return s.saveChannelsLocked()
+}
+
+// ClaimChannelOwner records the first poster as owner of a new channel.
+// Callers hold s.mu; this is a no-op when an owner is already recorded.
+func (s *Store) claimChannelOwnerLocked(channel, owner string) {
+	meta, ok := s.chanMeta[channel]
+	if ok && meta.Owner != "" {
+		return
+	}
+	meta.Owner = owner
+	s.chanMeta[channel] = meta
 }
 
 // ChannelExists reports whether a channel is known to the relay.

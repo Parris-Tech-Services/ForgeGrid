@@ -425,6 +425,7 @@ func channelCmd(args []string) {
 		fmt.Println("  post -channel <name> -message <text>")
 		fmt.Println("  read -channel <name> [-since <seq>] [-limit <n>]")
 		fmt.Println("  list")
+		fmt.Println("  perms -channel <name> [-members a,b] [-read-only]")
 		os.Exit(1)
 	}
 
@@ -436,6 +437,8 @@ func channelCmd(args []string) {
 		channelReadCmd(rest)
 	case "list":
 		channelListCmd(rest)
+	case "perms":
+		channelPermsCmd(rest)
 	default:
 		fmt.Printf("Unknown channel command: %s\n", sub)
 		os.Exit(1)
@@ -483,5 +486,31 @@ func channelListCmd(args []string) {
 		log.Fatalf("List error: %v", err)
 	}
 	b, _ := json.MarshalIndent(channels, "", "  ")
+	fmt.Println(string(b))
+}
+
+func channelPermsCmd(args []string) {
+	fs := flag.NewFlagSet("channel perms", flag.ExitOnError)
+	channel := fs.String("channel", "", "Channel name")
+	members := fs.String("members", "", "Comma-separated agents allowed to read and post (empty means all)")
+	readOnly := fs.Bool("read-only", false, "Restrict posting to the channel owner")
+	client := getClient(fs, args)
+
+	if *channel == "" {
+		log.Fatal("--channel required")
+	}
+
+	var list []string
+	for _, m := range strings.Split(*members, ",") {
+		if trimmed := strings.TrimSpace(m); trimmed != "" {
+			list = append(list, trimmed)
+		}
+	}
+
+	meta, err := client.SetChannelPermissions(*channel, list, *readOnly)
+	if err != nil {
+		log.Fatalf("Permissions error: %v", err)
+	}
+	b, _ := json.MarshalIndent(meta, "", "  ")
 	fmt.Println(string(b))
 }

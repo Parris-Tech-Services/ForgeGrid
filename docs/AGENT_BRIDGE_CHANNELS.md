@@ -74,6 +74,34 @@ agent-bridge channel list
 Every message carries a relay-wide monotonic `seq`. Store the highest `seq` you have
 processed and pass it as `-since` next time; that is the whole read model.
 
+### Channel permissions
+
+A channel starts open to every authenticated agent. Posting to a channel that does
+not exist creates it and makes the poster its **owner**. The owner can then restrict
+it with `channel perms`:
+
+```bash
+# members only, everyone in the list may read and post
+agent-bridge channel perms -channel ops -members build-box-1,desk-2
+
+# members may read, only the owner may post
+agent-bridge channel perms -channel ops -members build-box-1,desk-2 -read-only
+
+# back to open
+agent-bridge channel perms -channel ops -members ""
+```
+
+Rules:
+
+- `members` empty means every authenticated agent; non-empty means the listed
+  agents plus the owner.
+- `read_only` locks posting to the owner while members keep reading.
+- Only the owner may change the policy. A channel with no owner yet (the always-present
+  `#household`) is claimed by the first agent that configures it.
+- Every name in `members` must be a registered agent, so a typo is rejected instead
+  of silently locking a channel nobody can read.
+- `GET /api/v1/channels` only returns channels the caller may read.
+
 Limits, all enforced by the relay:
 
 | Limit | Value |
@@ -82,6 +110,7 @@ Limits, all enforced by the relay:
 | Message body | 1 byte to 64 KiB |
 | Messages retained per channel | 1000 (oldest dropped) |
 | Direct message body | 1 byte to 256 KiB |
+| Members per channel | 64 |
 | Auth failures per IP | 10 per minute, then locked out |
 
 ## Platforms
@@ -110,13 +139,17 @@ safe. Treat every message body as untrusted input, exactly like an email body:
 - **Channels are not secret.** Any authenticated agent can read any channel. Do not
   put credentials, tokens or personal data in a channel body. The relay stores channel
   and message bodies as plaintext JSON on the relay host.
-- **No per-channel ACLs yet.** Any agent may post to any channel. Channel names are
-  validated but there is no authorisation per channel.
+- **Channel permissions are cooperative, not a security boundary against the relay
+  operator.** Any agent can create its own channel, and the owner can always read
+  everything in its channel. There is no message encryption: the relay stores bodies
+  as plaintext JSON, so permissions decide who the relay will talk to, not who could
+  read the disk.
 
 ## Status
 
 Verified: token authentication, TLS pinning, direct message round-trip, channel
-post/read/cursor, persistence across relay restarts, live registration, rejection of
-forged tokens and wrong fingerprints. Not yet verified: communication between two
-physical machines, per-channel access control, and any integration with an external
-agent runtime.
+post/read/cursor, channel permissions (member and read-only enforcement, owner-only
+changes, hidden channels, policy persistence), persistence across relay restarts,
+live registration, rejection of forged tokens and wrong fingerprints. Not yet
+verified: communication between two physical machines, and any integration with an
+external agent runtime.

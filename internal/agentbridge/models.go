@@ -66,7 +66,51 @@ type ChannelMessage struct {
 
 // ChannelInfo summarises a channel for discovery.
 type ChannelInfo struct {
-	Name    string `json:"name"`
-	LastSeq uint64 `json:"last_seq"`
-	Count   int    `json:"count"`
+	Name     string   `json:"name"`
+	LastSeq  uint64   `json:"last_seq"`
+	Count    int      `json:"count"`
+	Owner    string   `json:"owner,omitempty"`
+	Members  []string `json:"members,omitempty"`
+	ReadOnly bool     `json:"read_only,omitempty"`
+}
+
+// ChannelMeta is a channel's access policy.
+//
+//   - Members empty means every authenticated agent may read and post.
+//   - Members non-empty means only those agents (and the owner) may.
+//   - ReadOnly means only the owner may post; members may still read.
+//
+// The owner is whoever first created the channel, or the first agent to
+// configure a channel that was created implicitly (the always-present board).
+type ChannelMeta struct {
+	Owner    string   `json:"owner,omitempty"`
+	Members  []string `json:"members,omitempty"`
+	ReadOnly bool     `json:"read_only,omitempty"`
+}
+
+// CanRead reports whether an agent may read the channel.
+func (m ChannelMeta) CanRead(agent string) bool {
+	if len(m.Members) == 0 {
+		return true
+	}
+	if agent == m.Owner {
+		return true
+	}
+	for _, member := range m.Members {
+		if member == agent {
+			return true
+		}
+	}
+	return false
+}
+
+// CanPost reports whether an agent may post to the channel.
+func (m ChannelMeta) CanPost(agent string) bool {
+	if !m.CanRead(agent) {
+		return false
+	}
+	if m.ReadOnly && agent != m.Owner {
+		return false
+	}
+	return true
 }
