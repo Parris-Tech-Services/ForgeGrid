@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	"forgegrid/internal/network"
@@ -127,4 +128,37 @@ func (c *Client) Fail(id string, result json.RawMessage) (*AgentMessage, error) 
 		return nil, err
 	}
 	return &out, nil
+}
+
+// PostChannelMessage appends a message to a channel. Posting to a channel that
+// does not exist yet creates it.
+func (c *Client) PostChannelMessage(channel, body string) (*ChannelMessage, error) {
+	path := "/api/v1/channels/" + url.PathEscape(channel) + "/messages"
+	req := map[string]string{"body": body}
+	var out ChannelMessage
+	if err := c.doReq(http.MethodPost, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetChannelMessages returns channel messages after the given cursor, oldest
+// first. A cursor of 0 returns from the start of the retained log.
+func (c *Client) GetChannelMessages(channel string, since uint64, limit int) ([]ChannelMessage, error) {
+	path := fmt.Sprintf("/api/v1/channels/%s/messages?since=%d&limit=%d",
+		url.PathEscape(channel), since, limit)
+	var out []ChannelMessage
+	if err := c.doReq(http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ListChannels returns every channel the relay knows about.
+func (c *Client) ListChannels() ([]ChannelInfo, error) {
+	var out []ChannelInfo
+	if err := c.doReq(http.MethodGet, "/api/v1/channels", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

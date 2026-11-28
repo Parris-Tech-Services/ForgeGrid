@@ -2,7 +2,9 @@ package agentbridge
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -10,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -235,8 +238,10 @@ func TestIntegrationConcurrent(t *testing.T) {
 		}
 		s.agents[a.Name] = a
 	}
+	if err := s.saveAgentsLocked(); err != nil {
+		t.Fatalf("persist agents: %v", err)
+	}
 	s.mu.Unlock()
-	s.save()
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 50) // Limit concurrency to avoid ephemeral port / backlog exhaustion on Windows
@@ -380,5 +385,213 @@ func TestIntegrationConcurrent(t *testing.T) {
 	}
 	if len(s3.messages) != 701 {
 		t.Fatalf("Expected 701 messages in s3, got %d", len(s3.messages))
+	}
+}
+
+// TestRegisterTakesEffectWithoutRestart covers the bug where `register` wrote
+// agents.json but a relay that was already running never saw the new agent,
+// so every call from it returned 401 until a restart.
+func TestRegisterTakesEffectWithoutRestart(t *testing.T) {
+	server, store, _ := setupTestServer(t)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+
+	// A separate process running `register` only touches agents.json.
+	fresh, err := NewStore()
+	if err != nil {
+		t.Fatalf("second store: %v", err)
+	}
+	secret := "late-secret"
+	sum := sha256.Sum256([]byte(secret))
+	if err := fresh.RegisterAgent("late-agent", hex.EncodeToString(sum[:])); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	if _, ok := store.GetAgent("late-agent"); ok {
+		t.Fatal("test setup invalid: running relay already knows the agent")
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/agent-messages/inbox", nil)
+	req.Header.Set("Authorization", "Bearer late-agent:"+secret)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 after live reload, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func postChannel(t *testing.T, mux *http.ServeMux, channel, auth, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	payload := strings.NewReader(`{"body":` + strconv.Quote(body) + `}`)
+	req := httptest.NewRequest("POST", "/api/v1/channels/"+channel+"/messages", payload)
+	req.Header.Set("Authorization", "Bearer "+auth)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	return w
+}
+
+func TestChannelPostReadCursor(t *testing.T) {
+	server, store, _ := setupTestServer(t)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	store.agents["fedora"] = AgentRegistration{Name: "fedora", TokenHash: "00b6241dddb1bc0bc657026c85cb001a0eeaee5715a4d4c9f031b8afc4ba7e1f"}
+	auth := "fedora:fedora-secret"
+
+	for i, body := range []string{"first", "second", "third"} {
+		w := postChannel(t, mux, DefaultChannel, auth, body)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("post %d: expected 201, got %d: %s", i, w.Code, w.Body.String())
+		}
+	}
+
+	read := func(query string) []ChannelMessage {
+		req := httptest.NewRequest("GET", "/api/v1/channels/"+DefaultChannel+"/messages"+query, nil)
+		req.Header.Set("Authorization", "Bearer "+auth)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("read %q: expected 200, got %d: %s", query, w.Code, w.Body.String())
+		}
+		var msgs []ChannelMessage
+		if err := json.Unmarshal(w.Body.Bytes(), &msgs); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return msgs
+	}
+
+	all := read("")
+	if len(all) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(all))
+	}
+	if all[0].Seq != 1 || all[2].Seq != 3 {
+		t.Fatalf("unexpected sequence numbers: %d..%d", all[0].Seq, all[2].Seq)
+	}
+	if all[0].Sender != "fedora" {
+		t.Fatalf("expected sender fedora, got %q", all[0].Sender)
+	}
+
+	if tail := read("?since=2"); len(tail) != 1 || tail[0].Body != "third" {
+		t.Fatalf("cursor read wrong: %+v", tail)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/channels", nil)
+	req.Header.Set("Authorization", "Bearer "+auth)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	var infos []ChannelInfo
+	if err := json.Unmarshal(w.Body.Bytes(), &infos); err != nil {
+		t.Fatalf("decode channels: %v", err)
+	}
+	if len(infos) != 1 || infos[0].Name != DefaultChannel || infos[0].LastSeq != 3 || infos[0].Count != 3 {
+		t.Fatalf("unexpected channel list: %+v", infos)
+	}
+}
+
+func TestChannelRejectsBadInput(t *testing.T) {
+	server, store, _ := setupTestServer(t)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	store.agents["fedora"] = AgentRegistration{Name: "fedora", TokenHash: "00b6241dddb1bc0bc657026c85cb001a0eeaee5715a4d4c9f031b8afc4ba7e1f"}
+
+	if w := postChannel(t, mux, DefaultChannel, "", "x"); w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without auth, got %d", w.Code)
+	}
+	if w := postChannel(t, mux, "BadName!", "fedora:fedora-secret", "x"); w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for bad channel name, got %d", w.Code)
+	}
+	if w := postChannel(t, mux, DefaultChannel, "fedora:fedora-secret", ""); w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty body, got %d", w.Code)
+	}
+	if w := postChannel(t, mux, DefaultChannel, "fedora:fedora-secret", strings.Repeat("x", maxChannelBodyBytes+1)); w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for oversized body, got %d", w.Code)
+	}
+}
+
+func TestChannelStatePersistsAcrossRestart(t *testing.T) {
+	// Isolate HOME: this test must not read or write a real relay's data dir.
+	t.Setenv("HOME", t.TempDir())
+
+	first, err := NewStore()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if _, err := first.PostChannelMessage("team", "fedora", "survives"); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+
+	second, err := NewStore()
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	msgs := second.GetChannelMessages("team", 0, 10)
+	if len(msgs) != 1 || msgs[0].Body != "survives" || msgs[0].Seq != 1 {
+		t.Fatalf("channel did not persist: %+v", msgs)
+	}
+}
+
+// TestConcurrentSaveAndReload guards the Windows regression where a message
+// write renamed agents.json while the live-registration reload had the same
+// file open, producing a sharing violation and an HTTP 500 for the sender.
+func TestConcurrentSaveAndReload(t *testing.T) {
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	sum := sha256.Sum256([]byte("secret"))
+	if err := store.RegisterAgent("agent-a", hex.EncodeToString(sum[:])); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	writer, err := NewStore()
+	if err != nil {
+		t.Fatalf("second store: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+
+	for i := 0; i < 40; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			msg := AgentMessage{
+				ID:        fmt.Sprintf("m-%d", i),
+				Sender:    "agent-a",
+				Recipient: "agent-a",
+				TaskID:    "t",
+				Type:      TypeInstruction,
+				Body:      "x",
+				CreatedAt: time.Now(),
+				ExpiresAt: time.Now().Add(time.Hour),
+				Status:    StatusPending,
+			}
+			if _, err := store.AddMessage(msg); err != nil {
+				errs <- err
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			store.ReloadAgentsIfChanged()
+		}()
+	}
+
+	// A separate process registering a new agent rewrites agents.json.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			sum := sha256.Sum256([]byte(fmt.Sprintf("s-%d", i)))
+			if err := writer.RegisterAgent(fmt.Sprintf("late-%d", i), hex.EncodeToString(sum[:])); err != nil {
+				errs <- err
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent write failed: %v", err)
 	}
 }

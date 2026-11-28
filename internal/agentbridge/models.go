@@ -49,3 +49,24 @@ type AgentRegistration struct {
 	TokenHash string    `json:"token_hash"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+// ChannelMessage is a message posted to a named channel (a shared board or
+// group conversation). Unlike AgentMessage it has no recipient, no expiry and
+// no acknowledgement state: a channel is append-only and every member reads the
+// same ordered log. Seq is a relay-wide monotonic cursor so a client can ask for
+// "everything after what I have already read".
+type ChannelMessage struct {
+	ID        string    `json:"id"`
+	Seq       uint64    `json:"seq"`
+	Channel   string    `json:"channel"`
+	Sender    string    `json:"sender"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ChannelInfo summarises a channel for discovery.
+type ChannelInfo struct {
+	Name    string `json:"name"`
+	LastSeq uint64 `json:"last_seq"`
+	Count   int    `json:"count"`
+}
