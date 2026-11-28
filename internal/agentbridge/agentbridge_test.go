@@ -535,6 +535,10 @@ func TestChannelStatePersistsAcrossRestart(t *testing.T) {
 // write renamed agents.json while the live-registration reload had the same
 // file open, producing a sharing violation and an HTTP 500 for the sender.
 func TestConcurrentSaveAndReload(t *testing.T) {
+	// Tests must never touch a real relay's data dir: on a machine that runs the
+	// relay, an unisolated store would rewrite live agents and messages.
+	t.Setenv("HOME", t.TempDir())
+
 	store, err := NewStore()
 	if err != nil {
 		t.Fatalf("store: %v", err)
