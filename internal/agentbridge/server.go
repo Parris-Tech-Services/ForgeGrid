@@ -122,7 +122,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/agent-messages/", s.handleMessageAction)
 	mux.HandleFunc("/api/v1/agent-status", s.handleStatus)
 	mux.HandleFunc("/api/v1/channels", s.handleChannels)
-	mux.HandleFunc("/api/v1/channels/", s.handleChannelMessages)
+	mux.HandleFunc("/api/v1/channels/", s.handleChannel)
 }
 
 // channelNameRe restricts channel names to a short, log-safe slug.
@@ -134,7 +134,8 @@ const maxChannelBodyBytes = 64 * 1024
 
 // handleChannels lists known channels.
 func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authenticate(r); !ok {
+	agent, ok := s.authenticate(r)
+	if !ok {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -143,14 +144,21 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	visible := make([]ChannelInfo, 0)
+	for _, info := range s.store.ListChannels() {
+		meta := s.store.ChannelMetaOf(info.Name)
+		if meta.CanRead(agent) {
+			visible = append(visible, info)
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.store.ListChannels())
+	json.NewEncoder(w).Encode(visible)
 }
 
 // handleChannelMessages reads or appends to /api/v1/channels/<name>/messages.
 // A POST to an unknown channel creates it, so a group can be started by simply
 // posting to it.
-func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleChannel(w http.ResponseWriter, r *http.Request) {
 	sender, ok := s.authenticate(r)
 	if !ok {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -159,13 +167,28 @@ func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 
 	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/channels/")
 	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) != 2 || parts[1] != "messages" {
+	if len(parts) != 2 {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
-	channel := parts[0]
+	channel, action := parts[0], parts[1]
 	if !channelNameRe.MatchString(channel) {
 		http.Error(w, "Bad request: invalid channel name", http.StatusBadRequest)
+		return
+	}
+
+	if action == "permissions" {
+		s.handleChannelPermissions(w, r, channel, sender)
+		return
+	}
+	if action != "messages" {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	meta := s.store.ChannelMetaOf(channel)
+	if !meta.CanRead(sender) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -194,6 +217,10 @@ func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(msgs)
 
 	case http.MethodPost:
+		if !meta.CanPost(sender) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
 		var req struct {
 			Body string `json:"body"`
 		}
@@ -402,6 +429,55 @@ func (s *Server) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(msg)
+}
+
+// handleChannelPermissions sets a channel's access policy. Only the owner may
+// change it; a channel with no owner yet is claimed by the caller. Every listed
+// member must be a registered agent, so a typo cannot silently lock a channel.
+func (s *Server) handleChannelPermissions(w http.ResponseWriter, r *http.Request, channel, sender string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Members  []string `json:"members"`
+		ReadOnly bool     `json:"read_only"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8*1024))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "Bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Members) > 64 {
+		http.Error(w, "Bad request: too many members", http.StatusBadRequest)
+		return
+	}
+	for _, member := range req.Members {
+		if _, ok := s.store.GetAgent(member); !ok {
+			http.Error(w, "Bad request: unknown agent "+member, http.StatusBadRequest)
+			return
+		}
+	}
+
+	meta := s.store.ChannelMetaOf(channel)
+	if meta.Owner != "" && meta.Owner != sender {
+		http.Error(w, "Forbidden: only the owner may change this channel", http.StatusForbidden)
+		return
+	}
+	meta.Owner = sender
+	meta.Members = req.Members
+	meta.ReadOnly = req.ReadOnly
+
+	if err := s.store.SetChannelMeta(channel, meta); err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(meta)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

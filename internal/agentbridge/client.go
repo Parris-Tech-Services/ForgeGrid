@@ -154,6 +154,18 @@ func (c *Client) GetChannelMessages(channel string, since uint64, limit int) ([]
 	return out, nil
 }
 
+// SetChannelPermissions sets a channel's access policy. Only the channel owner
+// may call this; a channel with no owner is claimed by the caller.
+func (c *Client) SetChannelPermissions(channel string, members []string, readOnly bool) (*ChannelMeta, error) {
+	path := "/api/v1/channels/" + url.PathEscape(channel) + "/permissions"
+	req := map[string]interface{}{"members": members, "read_only": readOnly}
+	var out ChannelMeta
+	if err := c.doReq(http.MethodPost, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ListChannels returns every channel the relay knows about.
 func (c *Client) ListChannels() ([]ChannelInfo, error) {
 	var out []ChannelInfo

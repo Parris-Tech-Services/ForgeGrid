@@ -595,3 +595,109 @@ func TestConcurrentSaveAndReload(t *testing.T) {
 		t.Fatalf("concurrent write failed: %v", err)
 	}
 }
+
+func addAgent(t *testing.T, store *Store, name, secret string) string {
+	t.Helper()
+	sum := sha256.Sum256([]byte(secret))
+	if err := store.RegisterAgent(name, hex.EncodeToString(sum[:])); err != nil {
+		t.Fatalf("register %s: %v", name, err)
+	}
+	return name + ":" + secret
+}
+
+func TestChannelPermissions(t *testing.T) {
+	server, store, _ := setupTestServer(t)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+
+	owner := addAgent(t, store, "owner-box", "owner-secret")
+	member := addAgent(t, store, "member-box", "member-secret")
+	outsider := addAgent(t, store, "outsider-box", "outsider-secret")
+
+	// Creating the channel by posting makes the poster the owner.
+	if w := postChannel(t, mux, "private", owner, "set up"); w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+
+	perms := func(auth, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/v1/channels/private/permissions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+auth)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w
+	}
+	read := func(auth string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/api/v1/channels/private/messages", nil)
+		req.Header.Set("Authorization", "Bearer "+auth)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w
+	}
+
+	// A non-owner cannot change the policy.
+	if w := perms(member, `{"members":[]}`); w.Code != http.StatusForbidden {
+		t.Errorf("non-owner perms: expected 403, got %d", w.Code)
+	}
+	// An unknown member is rejected rather than silently locking the channel.
+	if w := perms(owner, `{"members":["ghost-box"]}`); w.Code != http.StatusBadRequest {
+		t.Errorf("unknown member: expected 400, got %d", w.Code)
+	}
+
+	if w := perms(owner, `{"members":["member-box"],"read_only":false}`); w.Code != http.StatusOK {
+		t.Fatalf("owner perms: %d %s", w.Code, w.Body.String())
+	}
+
+	if w := read(member); w.Code != http.StatusOK {
+		t.Errorf("member read: expected 200, got %d", w.Code)
+	}
+	if w := read(outsider); w.Code != http.StatusForbidden {
+		t.Errorf("outsider read: expected 403, got %d", w.Code)
+	}
+	if w := postChannel(t, mux, "private", outsider, "let me in"); w.Code != http.StatusForbidden {
+		t.Errorf("outsider post: expected 403, got %d", w.Code)
+	}
+	if w := postChannel(t, mux, "private", member, "member speaking"); w.Code != http.StatusCreated {
+		t.Errorf("member post: expected 201, got %d", w.Code)
+	}
+
+	// Read-only: members may still read but only the owner may post.
+	if w := perms(owner, `{"members":["member-box"],"read_only":true}`); w.Code != http.StatusOK {
+		t.Fatalf("read-only perms: %d %s", w.Code, w.Body.String())
+	}
+	if w := read(member); w.Code != http.StatusOK {
+		t.Errorf("member read while read-only: expected 200, got %d", w.Code)
+	}
+	if w := postChannel(t, mux, "private", member, "not allowed now"); w.Code != http.StatusForbidden {
+		t.Errorf("member post while read-only: expected 403, got %d", w.Code)
+	}
+	if w := postChannel(t, mux, "private", owner, "owner announcement"); w.Code != http.StatusCreated {
+		t.Errorf("owner post while read-only: expected 201, got %d", w.Code)
+	}
+
+	// Listing hides channels the caller cannot read.
+	list := func(auth string) []ChannelInfo {
+		req := httptest.NewRequest("GET", "/api/v1/channels", nil)
+		req.Header.Set("Authorization", "Bearer "+auth)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		var infos []ChannelInfo
+		if err := json.Unmarshal(w.Body.Bytes(), &infos); err != nil {
+			t.Fatalf("decode list: %v", err)
+		}
+		return infos
+	}
+	for _, info := range list(outsider) {
+		if info.Name == "private" {
+			t.Fatal("outsider should not see the private channel")
+		}
+	}
+
+	// Permissions survive a relay restart.
+	reopened, err := NewStore()
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if meta := reopened.ChannelMetaOf("private"); meta.Owner != "owner-box" || !meta.ReadOnly {
+		t.Fatalf("policy did not persist: %+v", meta)
+	}
+}
