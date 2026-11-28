@@ -22,7 +22,8 @@ import (
 func RunCLI(args []string) {
 	if len(args) < 1 {
 		fmt.Println("Usage: forgegrid agent-bridge <command> [args...]")
-		fmt.Println("Commands: serve, rotate-tls, register, configure-client, reset-client, send, inbox, ack, complete, fail")
+		fmt.Println("Commands: serve, rotate-tls, register, configure-client, reset-client,")
+		fmt.Println("          send, inbox, ack, complete, fail, channel post|read|list|perms")
 		os.Exit(1)
 	}
 
