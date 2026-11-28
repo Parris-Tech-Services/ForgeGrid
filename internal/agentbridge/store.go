@@ -40,6 +40,9 @@ type Store struct {
 	agentsMod  time.Time
 	agentsSize int64
 
+	// filesMu serialises JSON state file reads and writes (see writeFile).
+	filesMu sync.Mutex
+
 	// saveMu serialises channels.json writes. PostChannelMessage appends under
 	// mu but writes the file after releasing it, so two concurrent posts would
 	// otherwise race on the same temporary file.
@@ -104,25 +107,40 @@ func (s *Store) load() error {
 	return nil
 }
 
-func (s *Store) save() error {
-	// Save agents
+// saveAgentsLocked writes agents.json. Callers hold s.mu.
+func (s *Store) saveAgentsLocked() error {
 	agB, err := json.MarshalIndent(s.agents, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := atomicWrite(filepath.Join(s.dataDir, "agents.json"), agB); err != nil {
-		return err
-	}
+	return s.writeFile("agents.json", agB)
+}
 
-	// Save messages
+// saveMessagesLocked writes messages.json. Callers hold s.mu.
+func (s *Store) saveMessagesLocked() error {
 	msgB, err := json.MarshalIndent(s.messages, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := atomicWrite(filepath.Join(s.dataDir, "messages.json"), msgB); err != nil {
-		return err
+	return s.writeFile("messages.json", msgB)
+}
+
+// writeFile writes through the shared file mutex with a short retry, because a
+// concurrent reader (or another process running `register`) can transiently
+// hold the destination open.
+func (s *Store) writeFile(name string, data []byte) error {
+	s.filesMu.Lock()
+	defer s.filesMu.Unlock()
+
+	path := filepath.Join(s.dataDir, name)
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		if err = atomicWrite(path, data); err == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(20*(attempt+1)) * time.Millisecond)
 	}
-	return nil
+	return err
 }
 
 func atomicWrite(path string, data []byte) error {
@@ -142,7 +160,7 @@ func (s *Store) RegisterAgent(name, tokenHash string) error {
 		TokenHash: tokenHash,
 		CreatedAt: time.Now(),
 	}
-	return s.save()
+	return s.saveAgentsLocked()
 }
 
 func (s *Store) GetAgent(name string) (AgentRegistration, bool) {
@@ -168,7 +186,7 @@ func (s *Store) AddMessage(msg AgentMessage) (AgentMessage, error) {
 		return msg, nil // Idempotent fallback
 	}
 	s.messages[msg.ID] = msg
-	return msg, s.save()
+	return msg, s.saveMessagesLocked()
 }
 
 func (s *Store) GetMessage(id string) (AgentMessage, bool) {
@@ -216,7 +234,7 @@ func (s *Store) TransitionMessage(id, recipient, action string, result json.RawM
 	}
 
 	s.messages[id] = msg
-	if err := s.save(); err != nil {
+	if err := s.saveMessagesLocked(); err != nil {
 		return AgentMessage{}, err
 	}
 
@@ -253,19 +271,23 @@ func GenerateID() (string, error) {
 func (s *Store) ReloadAgentsIfChanged() {
 	path := filepath.Join(s.dataDir, "agents.json")
 
-	fi, err := os.Stat(path)
-	if err != nil {
-		return
-	}
-
 	s.reloadMu.Lock()
 	defer s.reloadMu.Unlock()
 
-	if fi.ModTime().Equal(s.agentsMod) && fi.Size() == s.agentsSize {
+	// Hold the file mutex only for the stat and read; never while taking s.mu,
+	// so a writer holding s.mu cannot deadlock against a reload.
+	s.filesMu.Lock()
+	fi, err := os.Stat(path)
+	if err != nil {
+		s.filesMu.Unlock()
 		return
 	}
-
+	if fi.ModTime().Equal(s.agentsMod) && fi.Size() == s.agentsSize {
+		s.filesMu.Unlock()
+		return
+	}
 	b, err := os.ReadFile(path)
+	s.filesMu.Unlock()
 	if err != nil {
 		return
 	}

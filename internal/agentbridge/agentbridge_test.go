@@ -238,8 +238,10 @@ func TestIntegrationConcurrent(t *testing.T) {
 		}
 		s.agents[a.Name] = a
 	}
+	if err := s.saveAgentsLocked(); err != nil {
+		t.Fatalf("persist agents: %v", err)
+	}
 	s.mu.Unlock()
-	s.save()
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 50) // Limit concurrency to avoid ephemeral port / backlog exhaustion on Windows
@@ -526,5 +528,70 @@ func TestChannelStatePersistsAcrossRestart(t *testing.T) {
 	msgs := second.GetChannelMessages("team", 0, 10)
 	if len(msgs) != 1 || msgs[0].Body != "survives" || msgs[0].Seq != 1 {
 		t.Fatalf("channel did not persist: %+v", msgs)
+	}
+}
+
+// TestConcurrentSaveAndReload guards the Windows regression where a message
+// write renamed agents.json while the live-registration reload had the same
+// file open, producing a sharing violation and an HTTP 500 for the sender.
+func TestConcurrentSaveAndReload(t *testing.T) {
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	sum := sha256.Sum256([]byte("secret"))
+	if err := store.RegisterAgent("agent-a", hex.EncodeToString(sum[:])); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	writer, err := NewStore()
+	if err != nil {
+		t.Fatalf("second store: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+
+	for i := 0; i < 40; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			msg := AgentMessage{
+				ID:        fmt.Sprintf("m-%d", i),
+				Sender:    "agent-a",
+				Recipient: "agent-a",
+				TaskID:    "t",
+				Type:      TypeInstruction,
+				Body:      "x",
+				CreatedAt: time.Now(),
+				ExpiresAt: time.Now().Add(time.Hour),
+				Status:    StatusPending,
+			}
+			if _, err := store.AddMessage(msg); err != nil {
+				errs <- err
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			store.ReloadAgentsIfChanged()
+		}()
+	}
+
+	// A separate process registering a new agent rewrites agents.json.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			sum := sha256.Sum256([]byte(fmt.Sprintf("s-%d", i)))
+			if err := writer.RegisterAgent(fmt.Sprintf("late-%d", i), hex.EncodeToString(sum[:])); err != nil {
+				errs <- err
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent write failed: %v", err)
 	}
 }
