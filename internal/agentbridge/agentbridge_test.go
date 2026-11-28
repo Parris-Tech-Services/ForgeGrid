@@ -705,3 +705,147 @@ func TestChannelPermissions(t *testing.T) {
 		t.Fatalf("policy did not persist: %+v", meta)
 	}
 }
+
+// fakeBoard records calls so the MCP protocol layer can be tested without a relay.
+type fakeBoard struct {
+	posted   []string
+	readFrom []string
+	err      error
+}
+
+func (f *fakeBoard) PostChannelMessage(channel, body string) (*ChannelMessage, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.posted = append(f.posted, channel+":"+body)
+	return &ChannelMessage{ID: "abc", Seq: 7, Channel: channel, Sender: "me", Body: body}, nil
+}
+
+func (f *fakeBoard) GetChannelMessages(channel string, since uint64, limit int) ([]ChannelMessage, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.readFrom = append(f.readFrom, channel)
+	return []ChannelMessage{{ID: "m1", Seq: since + 1, Channel: channel, Sender: "other", Body: "hi"}}, nil
+}
+
+func (f *fakeBoard) ListChannels() ([]ChannelInfo, error) {
+	return []ChannelInfo{{Name: "household", LastSeq: 3, Count: 3}}, f.err
+}
+
+func (f *fakeBoard) SendMessage(recipient, taskID string, msgType MessageType, body string, ttl int, idem string) (*AgentMessage, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &AgentMessage{ID: "d1", Sender: "me", Recipient: recipient, TaskID: taskID, Type: msgType, Body: body}, nil
+}
+
+func (f *fakeBoard) GetInbox() ([]AgentMessage, error) {
+	return []AgentMessage{{ID: "i1", Sender: "other", Body: "question?"}}, f.err
+}
+
+// runMCP feeds newline-delimited requests through ServeMCP and returns the
+// decoded responses keyed by nothing in particular, in order.
+func runMCP(t *testing.T, board Board, requests ...string) []map[string]any {
+	t.Helper()
+	in := strings.NewReader(strings.Join(requests, "\n") + "\n")
+	var out bytes.Buffer
+	if err := ServeMCP(in, &out, board); err != nil {
+		t.Fatalf("ServeMCP: %v", err)
+	}
+	var responses []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("bad response %q: %v", line, err)
+		}
+		responses = append(responses, m)
+	}
+	return responses
+}
+
+func TestMCPHandshakeAndToolList(t *testing.T) {
+	board := &fakeBoard{}
+	responses := runMCP(t, board,
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
+	)
+
+	if len(responses) != 2 {
+		t.Fatalf("expected 2 responses (notification must not be answered), got %d", len(responses))
+	}
+
+	init := responses[0]["result"].(map[string]any)
+	if init["protocolVersion"] != "2024-11-05" {
+		t.Errorf("unexpected protocol version: %v", init["protocolVersion"])
+	}
+	if _, ok := init["serverInfo"]; !ok {
+		t.Error("missing serverInfo")
+	}
+
+	tools := responses[1]["result"].(map[string]any)["tools"].([]any)
+	names := map[string]bool{}
+	for _, tool := range tools {
+		names[tool.(map[string]any)["name"].(string)] = true
+	}
+	for _, want := range []string{"board_post", "board_read", "channel_list", "agent_send", "agent_inbox"} {
+		if !names[want] {
+			t.Errorf("tool %q not advertised", want)
+		}
+	}
+}
+
+func TestMCPToolCalls(t *testing.T) {
+	board := &fakeBoard{}
+	responses := runMCP(t, board,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"board_post","arguments":{"channel":"household","body":"hello"}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"board_read","arguments":{"channel":"household","since":4}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent_send","arguments":{"to":"desk","task_id":"t1","body":"ping"}}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"nope","arguments":{}}}`,
+	)
+
+	if len(board.posted) != 1 || board.posted[0] != "household:hello" {
+		t.Errorf("post not forwarded: %v", board.posted)
+	}
+	if len(board.readFrom) != 1 || board.readFrom[0] != "household" {
+		t.Errorf("read not forwarded: %v", board.readFrom)
+	}
+
+	for _, idx := range []int{0, 1, 2} {
+		res := responses[idx]["result"].(map[string]any)
+		if res["isError"] == true {
+			t.Errorf("call %d unexpectedly failed: %v", idx, res["content"])
+		}
+		if len(res["content"].([]any)) == 0 {
+			t.Errorf("call %d returned no content", idx)
+		}
+	}
+
+	unknown := responses[3]["result"].(map[string]any)
+	if unknown["isError"] != true {
+		t.Error("unknown tool should be an error result")
+	}
+}
+
+func TestMCPRejectsBadInput(t *testing.T) {
+	board := &fakeBoard{}
+	responses := runMCP(t, board,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"board_post","arguments":{"channel":"household"}}}`,
+		`not json`,
+		`{"jsonrpc":"2.0","id":3,"method":"no/such/method"}`,
+	)
+
+	if responses[0]["result"].(map[string]any)["isError"] != true {
+		t.Error("missing body should be a tool error")
+	}
+	if responses[1]["error"] == nil {
+		t.Error("malformed JSON should be a JSON-RPC parse error")
+	}
+	if responses[2]["error"] == nil {
+		t.Error("unknown method should be a JSON-RPC error")
+	}
+}
