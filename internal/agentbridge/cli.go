@@ -48,6 +48,8 @@ func RunCLI(args []string) {
 		completeCmd(args[1:])
 	case "fail":
 		failCmd(args[1:])
+	case "channel":
+		channelCmd(args[1:])
 	default:
 		fmt.Printf("Unknown command: %s\n", cmd)
 		os.Exit(1)
@@ -250,7 +252,8 @@ func configureClientCmd(args []string) {
 	}
 
 	fmt.Printf("Client configured successfully at %s.\n", path)
-	fmt.Println("Note: Token is stored in plaintext and protected by a current-user Windows ACL.")
+	fmt.Println("Note: the token is stored in plaintext, protected only by file permissions")
+	fmt.Println("      (0600) and your OS account. Use a dedicated agent identity per machine.")
 }
 
 func resetClientCmd(args []string) {
@@ -258,12 +261,12 @@ func resetClientCmd(args []string) {
 	fmt.Println("Client configuration reset.")
 }
 
-func getClient(fs *flag.FlagSet) *Client {
+func getClient(fs *flag.FlagSet, args []string) *Client {
 	url := fs.String("url", "https://127.0.0.1:9090", "Relay URL")
 	name := fs.String("name", "", "Agent name")
 	fp := fs.String("fingerprint", "", "TLS fingerprint")
 	insecure := fs.Bool("insecure", false, "Disable TLS verification")
-	fs.Parse(os.Args[3:])
+	fs.Parse(args)
 
 	var token string
 
@@ -318,7 +321,7 @@ func sendCmd(args []string) {
 	msgType := fs.String("type", string(TypeInstruction), "Message type")
 	body := fs.String("message", "", "Message body")
 	idem := fs.String("idempotency-key", "", "Idempotency key")
-	client := getClient(fs)
+	client := getClient(fs, args)
 
 	if *to == "" || *body == "" {
 		log.Fatal("--to and --message required")
@@ -333,7 +336,7 @@ func sendCmd(args []string) {
 
 func inboxCmd(args []string) {
 	fs := flag.NewFlagSet("inbox", flag.ExitOnError)
-	client := getClient(fs)
+	client := getClient(fs, args)
 
 	msgs, err := client.GetInbox()
 	if err != nil {
@@ -347,7 +350,7 @@ func inboxCmd(args []string) {
 func ackCmd(args []string) {
 	fs := flag.NewFlagSet("ack", flag.ExitOnError)
 	id := fs.String("message-id", "", "Message ID")
-	client := getClient(fs)
+	client := getClient(fs, args)
 
 	if *id == "" {
 		log.Fatal("--message-id required")
@@ -364,7 +367,7 @@ func completeCmd(args []string) {
 	fs := flag.NewFlagSet("complete", flag.ExitOnError)
 	id := fs.String("message-id", "", "Message ID")
 	resFile := fs.String("result-file", "", "Result JSON file")
-	client := getClient(fs)
+	client := getClient(fs, args)
 
 	if *id == "" {
 		log.Fatal("--message-id required")
@@ -392,7 +395,7 @@ func failCmd(args []string) {
 	fs := flag.NewFlagSet("fail", flag.ExitOnError)
 	id := fs.String("message-id", "", "Message ID")
 	resFile := fs.String("result-file", "", "Result JSON file")
-	client := getClient(fs)
+	client := getClient(fs, args)
 
 	if *id == "" {
 		log.Fatal("--message-id required")
@@ -414,4 +417,71 @@ func failCmd(args []string) {
 		log.Fatalf("Fail error: %v", err)
 	}
 	fmt.Printf("Message %s failed.\n", msg.ID)
+}
+
+func channelCmd(args []string) {
+	if len(args) < 1 {
+		fmt.Println("Usage: forgegrid agent-bridge channel <post|read|list> [args...]")
+		fmt.Println("  post -channel <name> -message <text>")
+		fmt.Println("  read -channel <name> [-since <seq>] [-limit <n>]")
+		fmt.Println("  list")
+		os.Exit(1)
+	}
+
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "post":
+		channelPostCmd(rest)
+	case "read":
+		channelReadCmd(rest)
+	case "list":
+		channelListCmd(rest)
+	default:
+		fmt.Printf("Unknown channel command: %s\n", sub)
+		os.Exit(1)
+	}
+}
+
+func channelPostCmd(args []string) {
+	fs := flag.NewFlagSet("channel post", flag.ExitOnError)
+	channel := fs.String("channel", DefaultChannel, "Channel name")
+	message := fs.String("message", "", "Message body")
+	client := getClient(fs, args)
+
+	if *message == "" {
+		log.Fatal("--message required")
+	}
+
+	msg, err := client.PostChannelMessage(*channel, *message)
+	if err != nil {
+		log.Fatalf("Post error: %v", err)
+	}
+	fmt.Printf("Posted to #%s at seq %d (id %s)\n", msg.Channel, msg.Seq, msg.ID)
+}
+
+func channelReadCmd(args []string) {
+	fs := flag.NewFlagSet("channel read", flag.ExitOnError)
+	channel := fs.String("channel", DefaultChannel, "Channel name")
+	since := fs.Uint64("since", 0, "Return messages after this sequence number")
+	limit := fs.Int("limit", 100, "Maximum messages to return")
+	client := getClient(fs, args)
+
+	msgs, err := client.GetChannelMessages(*channel, *since, *limit)
+	if err != nil {
+		log.Fatalf("Read error: %v", err)
+	}
+	b, _ := json.MarshalIndent(msgs, "", "  ")
+	fmt.Println(string(b))
+}
+
+func channelListCmd(args []string) {
+	fs := flag.NewFlagSet("channel list", flag.ExitOnError)
+	client := getClient(fs, args)
+
+	channels, err := client.ListChannels()
+	if err != nil {
+		log.Fatalf("List error: %v", err)
+	}
+	b, _ := json.MarshalIndent(channels, "", "  ")
+	fmt.Println(string(b))
 }

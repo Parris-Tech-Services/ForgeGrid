@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +52,10 @@ func (s *Server) cleanupLoop() {
 }
 
 func (s *Server) authenticate(r *http.Request) (string, bool) {
+	// Pick up agents registered after this relay started. Without this a fresh
+	// `register` only took effect after a restart.
+	s.store.ReloadAgentsIfChanged()
+
 	ip := r.RemoteAddr
 	if idx := strings.LastIndex(ip, ":"); idx != -1 {
 		ip = ip[:idx]
@@ -115,6 +121,111 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/agent-messages/inbox", s.handleInbox)
 	mux.HandleFunc("/api/v1/agent-messages/", s.handleMessageAction)
 	mux.HandleFunc("/api/v1/agent-status", s.handleStatus)
+	mux.HandleFunc("/api/v1/channels", s.handleChannels)
+	mux.HandleFunc("/api/v1/channels/", s.handleChannelMessages)
+}
+
+// channelNameRe restricts channel names to a short, log-safe slug.
+var channelNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+
+// maxChannelBodyBytes caps a single channel post. Channel bodies are text for
+// humans and agents, not file transfer.
+const maxChannelBodyBytes = 64 * 1024
+
+// handleChannels lists known channels.
+func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authenticate(r); !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.store.ListChannels())
+}
+
+// handleChannelMessages reads or appends to /api/v1/channels/<name>/messages.
+// A POST to an unknown channel creates it, so a group can be started by simply
+// posting to it.
+func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
+	sender, ok := s.authenticate(r)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/channels/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[1] != "messages" {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+	channel := parts[0]
+	if !channelNameRe.MatchString(channel) {
+		http.Error(w, "Bad request: invalid channel name", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		since := uint64(0)
+		if v := r.URL.Query().Get("since"); v != "" {
+			parsed, err := strconv.ParseUint(v, 10, 64)
+			if err != nil {
+				http.Error(w, "Bad request: invalid since", http.StatusBadRequest)
+				return
+			}
+			since = parsed
+		}
+		limit := 100
+		if v := r.URL.Query().Get("limit"); v != "" {
+			parsed, err := strconv.Atoi(v)
+			if err != nil {
+				http.Error(w, "Bad request: invalid limit", http.StatusBadRequest)
+				return
+			}
+			limit = parsed
+		}
+		msgs := s.store.GetChannelMessages(channel, since, limit)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(msgs)
+
+	case http.MethodPost:
+		var req struct {
+			Body string `json:"body"`
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxChannelBodyBytes))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			http.Error(w, "Bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		var dummy json.RawMessage
+		if err := dec.Decode(&dummy); err != io.EOF {
+			http.Error(w, "Bad request: multiple objects", http.StatusBadRequest)
+			return
+		}
+		if len(req.Body) == 0 || len(req.Body) > maxChannelBodyBytes {
+			http.Error(w, "Bad request: body too large or empty", http.StatusBadRequest)
+			return
+		}
+
+		msg, err := s.store.PostChannelMessage(channel, sender, req.Body)
+		if err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(msg)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {

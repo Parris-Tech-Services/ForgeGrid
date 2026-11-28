@@ -7,15 +7,43 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
+
+// maxChannelMessages bounds how many messages a single channel keeps on disk.
+// Channels are append-only logs, not archives; the oldest entries are dropped
+// once the cap is reached so an unauthenticated flood cannot fill the disk.
+const maxChannelMessages = 1000
+
+// DefaultChannel is the shared household board. It always exists.
+const DefaultChannel = "household"
+
+// channelState is the on-disk shape of channels.json.
+type channelState struct {
+	NextSeq  uint64                      `json:"next_seq"`
+	Channels map[string][]ChannelMessage `json:"channels"`
+}
 
 type Store struct {
 	mu       sync.RWMutex
 	dataDir  string
 	agents   map[string]AgentRegistration
 	messages map[string]AgentMessage
+	channels map[string][]ChannelMessage
+	nextSeq  uint64
+
+	// reloadMu serialises agents.json re-reads; agentsMod/agentsSize remember
+	// the last version seen so an unchanged file is not parsed on every request.
+	reloadMu   sync.Mutex
+	agentsMod  time.Time
+	agentsSize int64
+
+	// saveMu serialises channels.json writes. PostChannelMessage appends under
+	// mu but writes the file after releasing it, so two concurrent posts would
+	// otherwise race on the same temporary file.
+	saveMu sync.Mutex
 }
 
 func NewStore() (*Store, error) {
@@ -33,10 +61,15 @@ func NewStore() (*Store, error) {
 		dataDir:  dataDir,
 		agents:   make(map[string]AgentRegistration),
 		messages: make(map[string]AgentMessage),
+		channels: make(map[string][]ChannelMessage),
 	}
 
 	if err := s.load(); err != nil {
 		return nil, err
+	}
+
+	if _, ok := s.channels[DefaultChannel]; !ok {
+		s.channels[DefaultChannel] = []ChannelMessage{}
 	}
 
 	return s, nil
@@ -55,6 +88,18 @@ func (s *Store) load() error {
 		if err := json.Unmarshal(b, &s.messages); err != nil {
 			return fmt.Errorf("corrupt messages.json: %w", err)
 		}
+	}
+
+	channelsPath := filepath.Join(s.dataDir, "channels.json")
+	if b, err := os.ReadFile(channelsPath); err == nil {
+		var st channelState
+		if err := json.Unmarshal(b, &st); err != nil {
+			return fmt.Errorf("corrupt channels.json: %w", err)
+		}
+		if st.Channels != nil {
+			s.channels = st.Channels
+		}
+		s.nextSeq = st.NextSeq
 	}
 	return nil
 }
@@ -199,4 +244,144 @@ func GenerateID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// ReloadAgentsIfChanged re-reads agents.json when a different version is on
+// disk. This lets `register` take effect on a relay that is already running:
+// previously a new agent was invisible until the relay restarted, and every
+// call it made returned 401. A missing file is not an error (fresh install).
+func (s *Store) ReloadAgentsIfChanged() {
+	path := filepath.Join(s.dataDir, "agents.json")
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
+	if fi.ModTime().Equal(s.agentsMod) && fi.Size() == s.agentsSize {
+		return
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var agents map[string]AgentRegistration
+	if err := json.Unmarshal(b, &agents); err != nil {
+		// Leave the last good copy in place rather than dropping every agent.
+		return
+	}
+
+	s.mu.Lock()
+	s.agents = agents
+	s.mu.Unlock()
+
+	s.agentsMod = fi.ModTime()
+	s.agentsSize = fi.Size()
+}
+
+func (s *Store) saveChannels() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
+	s.mu.RLock()
+	st := channelState{NextSeq: s.nextSeq, Channels: s.channels}
+	s.mu.RUnlock()
+
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(s.dataDir, "channels.json"), b)
+}
+
+// PostChannelMessage appends one message to a channel and returns it with its
+// assigned sequence number.
+func (s *Store) PostChannelMessage(channel, sender, body string) (ChannelMessage, error) {
+	id, err := GenerateID()
+	if err != nil {
+		return ChannelMessage{}, err
+	}
+
+	s.mu.Lock()
+	s.nextSeq++
+	msg := ChannelMessage{
+		ID:        id,
+		Seq:       s.nextSeq,
+		Channel:   channel,
+		Sender:    sender,
+		Body:      body,
+		CreatedAt: time.Now().UTC(),
+	}
+	log := append(s.channels[channel], msg)
+	if len(log) > maxChannelMessages {
+		log = log[len(log)-maxChannelMessages:]
+	}
+	s.channels[channel] = log
+	s.mu.Unlock()
+
+	if err := s.saveChannels(); err != nil {
+		return ChannelMessage{}, err
+	}
+	return msg, nil
+}
+
+// GetChannelMessages returns channel messages with Seq greater than since,
+// oldest first, at most limit entries (limit is clamped to 1..500).
+func (s *Store) GetChannelMessages(channel string, since uint64, limit int) []ChannelMessage {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]ChannelMessage, 0, limit)
+	for _, m := range s.channels[channel] {
+		if m.Seq <= since {
+			continue
+		}
+		out = append(out, m)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// ListChannels returns channel summaries sorted by name.
+func (s *Store) ListChannels() []ChannelInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	names := make([]string, 0, len(s.channels))
+	for name := range s.channels {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]ChannelInfo, 0, len(names))
+	for _, name := range names {
+		log := s.channels[name]
+		var last uint64
+		if len(log) > 0 {
+			last = log[len(log)-1].Seq
+		}
+		out = append(out, ChannelInfo{Name: name, LastSeq: last, Count: len(log)})
+	}
+	return out
+}
+
+// ChannelExists reports whether a channel is known to the relay.
+func (s *Store) ChannelExists(channel string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.channels[channel]
+	return ok
 }
